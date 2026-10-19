@@ -11,6 +11,10 @@ services:
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
     volumes:
       - ${APPDATA_PATH:-./data}:/data
     security_opt:

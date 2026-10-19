@@ -2,6 +2,7 @@
 import asyncio
 import time
 import httpx
+from .proxy import validate_http_environment, ProxyConfigError
 
 ACCOUNT = 'https://account.guangyapan.com/v1'
 API = 'https://api.guangyapan.com/userres/v1'
@@ -35,11 +36,20 @@ def check(body):
 class Cloud:
     def __init__(self, store):
         self.store = store
-        self.http = httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False)
+        self.proxy_error = ''
+        try:
+            validate_http_environment()
+            self.http = httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=True)
+        except (ProxyConfigError, ValueError) as error:
+            self.proxy_error = str(error) if isinstance(error, ProxyConfigError) else 'HTTP 环境代理配置错误，请检查代理 URL 和 NO_PROXY'
+            # Keep WebUI available, but never silently send direct requests.
+            self.http = httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False)
         self.lock = asyncio.Lock()
-        self.login_error = ''
+        self.login_error = self.proxy_error
 
     async def raw(self, url, payload, token=''):
+        if self.proxy_error:
+            raise CloudError(self.proxy_error)
         headers = {'Authorization': f'Bearer {token}'} if token else {}
         response = await self.http.post(url, json=payload, headers=headers)
         if response.status_code == 401:

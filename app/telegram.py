@@ -1,8 +1,31 @@
 import asyncio
 import time
+import os
+import logging
+import socks
 from telethon import TelegramClient, events, utils
 from telethon.errors import SessionPasswordNeededError, PasswordHashInvalidError, FloodWaitError
 from .extract import extract, resource_title
+from .proxy import http_proxy, ProxyConfigError
+
+
+# Telethon may log raw network exceptions and protocol request objects. Keep
+# those out of application logs; expose only our fixed, sanitized status text.
+TRANSPORT_LOG = logging.getLogger('sbtg2cloud.telegram_transport')
+TRANSPORT_LOG.setLevel(logging.CRITICAL + 1)
+TRANSPORT_LOG.propagate = False
+
+
+def connection_error(error, using_proxy):
+    if isinstance(error, ProxyConfigError):
+        return str(error)
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return ('HTTP 代理连接 Telegram 超时' if using_proxy else 'Telegram 直连超时') + '，10 秒后重试'
+    if isinstance(error, socks.HTTPError):
+        return 'HTTP 代理拒绝 CONNECT 请求，请检查认证及代理访问规则；10 秒后重试'
+    if using_proxy:
+        return '通过 HTTP 代理连接 Telegram 失败，请检查代理可达性、CONNECT 支持及认证；10 秒后重试'
+    return 'Telegram 直连失败，请检查网络或配置 TELEGRAM_PROXY_URL；10 秒后重试'
 
 
 class Telegram:
@@ -22,9 +45,10 @@ class Telegram:
             if not config:
                 return
             if self.client is None:
+                proxy = http_proxy(os.environ.get('TELEGRAM_PROXY_URL'))
                 self.client = TelegramClient(str(self.directory / 'telegram'), config['api_id'], config['api_hash'],
                                              auto_reconnect=False, connection_retries=1, catch_up=False,
-                                             flood_sleep_threshold=0)
+                                             flood_sleep_threshold=0, proxy=proxy, base_logger=TRANSPORT_LOG)
                 self.client.add_event_handler(self.message, events.NewMessage(incoming=True))
             if not self.client.is_connected():
                 self.ready_at = None
@@ -37,14 +61,19 @@ class Telegram:
                 else:
                     self.state = 'login_required'
 
+    async def connect_once(self):
+        try:
+            await self.ensure()
+        except Exception as error:
+            self.ready_at = None
+            self.state = 'proxy_config_error' if isinstance(error, ProxyConfigError) else 'disconnected'
+            self.error = connection_error(error, bool(os.environ.get('TELEGRAM_PROXY_URL')))
+            return False
+        return True
+
     async def run(self):
         while True:
-            try:
-                await self.ensure()
-            except Exception:
-                self.ready_at = None
-                self.state = 'disconnected'
-                self.error = 'Telegram 连接失败，10 秒后重连'
+            await self.connect_once()
             await asyncio.sleep(10)
 
     async def message(self, event):
@@ -77,7 +106,8 @@ class Telegram:
                 await self.login_task
             except asyncio.CancelledError:
                 pass
-        await self.ensure()
+        if not await self.connect_once():
+            raise ValueError(self.error)
         if not self.client:
             raise ValueError('请先填写 Telegram API ID 和 API Hash')
         if await self.client.is_user_authorized():

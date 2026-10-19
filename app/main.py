@@ -84,6 +84,8 @@ async def value_exception(request, error):
 
 @app.exception_handler(httpx.HTTPError)
 async def http_exception(request, error):
+    if isinstance(error, httpx.ProxyError):
+        return JSONResponse({'detail': 'HTTP 代理连接光鸭失败，请检查代理认证和 CONNECT 支持'}, status_code=502)
     return JSONResponse({'detail': '连接光鸭服务失败，请稍后重试'}, status_code=502)
 
 

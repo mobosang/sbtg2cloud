@@ -59,6 +59,39 @@ docker build --platform linux/amd64 -t sbtg2cloud:local .
 
 镜像包含健康检查。数据目录应只允许服务用户和管理员访问。
 
+## 可选的单容器 HTTP 代理
+
+默认代理变量为空，保持直连。仅支持 **HTTP CONNECT** 代理；没有实现或验证 SOCKS5、SOCKS4、MTProxy，也不接受 `https://` 代理协议。`HTTPS_PROXY` 表示 HTTPS 目标使用的代理，其值仍填写 `http://代理主机:端口`。
+
+在项目 `.env` 中按需填写（示例主机需自行替换，不要提交真实地址或密码）：
+
+```env
+TELEGRAM_PROXY_URL=http://proxy.example:8080
+HTTP_PROXY=http://proxy.example:8080
+HTTPS_PROXY=http://proxy.example:8080
+NO_PROXY=localhost,127.0.0.1,::1
+```
+
+- `TELEGRAM_PROXY_URL` 显式传给 Telethon；不配置则 Telegram 直连。它不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
+- `HTTP_PROXY`、`HTTPS_PROXY` 由光鸭的 HTTPX 客户端读取。此前代码设置了 `trust_env=False`，本版已改为 `True`。只想让 Telegram 走代理时，其余代理变量保持为空即可。
+- `NO_PROXY` 仅影响 HTTPX；可填写明确的主机名或 IP。不能假设 HTTPX 支持 CIDR 网段匹配，本项目仅测试了精确主机匹配。不需要访问内网其他服务时，使用上面的本地地址即可。
+- 使用代理时始终建议显式填写端口。Telegram 未指定端口时默认 8080；HTTPX 遵循 HTTP URL 默认端口 80。
+- 带认证时使用 `http://用户名:密码@主机:端口`。用户名、密码必须非空；`@`、`:`、`#`、`%` 等特殊字符按 URL 规则编码，例如 `http://user%40domain:p%40ss%3Aword@proxy.example:8080`。若 Compose `.env` 的值含字面 `$`，使用单引号包裹该值，避免变量插值。
+
+Compose 已显式把上述变量传入 **sbtg2cloud 这一个容器**，不更改宿主机或其他容器。不要把代理地址写入源码或 Dockerfile。在 Unraid Docker 模板部署时，给同一个容器添加对应的环境变量，效果相同。
+
+升级代码/依赖后执行：
+
+```sh
+docker compose up -d --build --force-recreate sbtg2cloud
+```
+
+只修改代理环境变量时也必须重建容器，单纯 `docker restart` 不会加载新环境。原 `/data` 挂载保持不变；不要删除会话、重置数据库或同时启动第二个实例。
+
+配置错误会在 WebUI 显示具体字段及原因，不回显 URL 或认证信息；不会悄悄改为直连。普通连接失败按原有间隔每 10 秒重试。Telethon 有时会把底层超时/代理握手异常归并为通用连接错误，此时页面会说明正在通过 HTTP 代理连接，并提示检查可达性、CONNECT 支持和认证，不能保证总能精确判别 407 或超时。SDK 原始日志已禁用，避免协议请求或异常携带敏感数据；页面只显示经过处理的固定错误提示。
+
+验证范围：测试覆盖无代理、HTTP 代理、百分号编码认证、非法配置、失败后重试、HTTPX 环境代理和精确 `NO_PROXY` 匹配，并用本地 HTTP CONNECT 服务验证 PySocks 实际握手及认证。用户现场报告已验证原会话恢复连接、光鸭目录和既有配置/历史保持不变；本次未访问现场代理，也未用新分享验证完整自动转存链路。
+
 ## 初始化
 
 1. 打开 [my.telegram.org/apps](https://my.telegram.org/apps)，申请自己的 Telegram 应用，填写 **API ID / API Hash**。这是应用凭据，不是 Bot Token；扫码登录也需要它们。

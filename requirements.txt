@@ -2,5 +2,6 @@ fastapi==0.115.12
 uvicorn==0.34.2
 httpx==0.28.1
 Telethon==1.40.0
+PySocks==1.7.1
 qrcode==8.2
 pillow==11.2.1
