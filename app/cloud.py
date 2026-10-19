@@ -144,12 +144,13 @@ class Cloud:
             if not isinstance(data, dict):
                 raise CloudError('文件列表格式异常')
             rows = data.get('files', data.get('list'))
-            # Normal empty directories may omit the array when total is zero,
-            # or serialize it as null. Never generalize this to share/cursor pages.
+            # Observed userres empty directory response: {"msg":"success","data":{}}.
+            # Also accept explicit zero/null arrays, only for normal directory lists.
+            # Unknown non-empty shapes and share/cursor responses still fail closed.
             if rows is None and path == '/file/get_file_list' and not cursor_mode:
                 empty_array = ('list' in data and data['list'] is None) or ('files' in data and data['files'] is None)
                 total = data.get('total')
-                if not data.get('hasMore') and (total in (0, '0') or (total is None and empty_array)):
+                if not data or (not data.get('hasMore') and (total in (0, '0') or (total is None and empty_array))):
                     rows = []
             if not isinstance(rows, list):
                 raise CloudError('文件列表字段无法识别，需核对接口')

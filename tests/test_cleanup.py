@@ -253,21 +253,39 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.cloud.delete_cleanup_folder.assert_not_awaited()
 
     async def test_empty_directory_protocol_and_unknown_schema(self):
-        for body in ({'total':0}, {'total':0,'list':None}, {'list':None}, {'files':None}, {'list':[]}):
+        for body in ({}, {'total':0}, {'total':0,'list':None}, {'list':None}, {'files':None}, {'list':[]}):
             self.cloud.call=AsyncMock(return_value=body)
             self.assertEqual(await self.cloud.pages('/file/get_file_list',{}),[])
-        for body in ({}, {'total':1}, {'total':1,'list':None}, {'total':0,'hasMore':True}):
+        for body in ({'unexpected':'schema'}, {'total':1}, {'total':1,'list':None}, {'total':0,'hasMore':True}):
             self.cloud.call=AsyncMock(return_value=body)
             with self.assertRaises(CloudError):
                 await self.cloud.pages('/file/get_file_list',{})
+        self.cloud.call=AsyncMock(return_value={})
+        with self.assertRaises(CloudError):
+            await self.cloud.pages('/get_share_page_files_list',{},cursor_mode=True)
+
+    async def test_history_queue_handles_nested_empty_object_response(self):
+        self.enqueue()
+        self.store.execute("UPDATE jobs SET status='success',created=1")
+        self.cloud.call=AsyncMock(side_effect=[
+            {'total':1,'list':[{'fileId':'series','fileName':'Example (2026)','resType':2}]},
+            {'total':1,'list':[{'fileId':'empty-child','fileName':'Extras','resType':2}]},
+            {}])
+        self.cloud.delete_cleanup_folder=AsyncMock()
+        await queue_history(self.store,self.cloud,1,'series','Example (2026)')
+        self.assertEqual(self.job()['cleanup_state'],'pending')
+        self.assertIn('empty-child',self.job()['cleanup_manifest'])
+        self.cloud.delete_cleanup_folder.assert_not_awaited()
 
     async def test_retry_old_empty_folder_saves_directly_to_selected_parent(self):
         self.store.set('auto_cleanup',True)
         self.enqueue()
         self.store.update_job(1,cleanup_folder='existing',cleanup_name='sbtg-existing')
         self.cloud.prepare=AsyncMock(return_value=('access',['source'],'Title',[]))
-        self.cloud.cleanup_manifest=AsyncMock(return_value='[]')
-        self.cloud.pages=AsyncMock(return_value=[])
+        self.cloud.call=AsyncMock(side_effect=[
+            {'list':[{'fileId':'existing','fileName':'sbtg-existing','resType':2}]},
+            {},
+            {'list':[{'fileId':'existing','fileName':'sbtg-existing','resType':2}]}])
         self.cloud.create_cleanup_folder=AsyncMock()
         self.cloud.submit=AsyncMock(return_value='task')
         await self.worker.process(self.job())
