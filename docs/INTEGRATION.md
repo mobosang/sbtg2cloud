@@ -35,7 +35,7 @@
 
 官方网页 JS 的删除调用及 [ChenyangGao/guangyapan 的 fs_delete](https://github.com/ChenyangGao/guangyapan/blob/main/guangyapan/client.py) 对应 `POST /userres/v1/file/delete_file`，请求 `{"fileIds":["自己网盘的文件或目录ID"]}`，返回 `data.taskId`。普通目录移入回收站；对已在回收站内的对象再次调用可能永久删除。因此实现不自动重试删除请求（包括 401），只轮询已知任务 ID，未知回执人工核对。
 
-采用 `POST /userres/v1/file/create_dir`，参数 `dirName,parentId,failIfNameExist=true`，获取 `data.fileId` 创建每任务独立目录。成功后保存目录内容快照，到期再检查。源分享 ID 不作删除目标，历史记录不自动绑定同名目录。删除接口来源为网页协议与第三方实现，并非公开 OpenAPI 的稳定性承诺；当前仅完成模拟测试，没有实际删除账号数据。
+转存直接使用用户指定 `parentId`，不再创建中间目录。启用清理时，比较转存前后的目标 ID，并按分享顶层名称、类型、大小定位新增资源；已有同名项、合并或非唯一匹配不自动清理。源分享 ID 不作删除目标。历史缺少成功时间时按任务创建超过两小时判定，但需先选定实际目标 ID。接口仅完成模拟删除测试，没有在开发阶段实际删除账号数据。
 
 新增 `completed_at` 与清理字段通过 SQLite 增量迁移；原记录成功时间保留为空，不伪造。清理状态与转存状态分离，删除失败不修改成功去重记录。`deleting` 启动恢复为 `uncertain`，不会重发；成功后未能记录快照的任务停止清理。
 

@@ -144,6 +144,13 @@ class Cloud:
             if not isinstance(data, dict):
                 raise CloudError('文件列表格式异常')
             rows = data.get('files', data.get('list'))
+            # Normal empty directories may omit the array when total is zero,
+            # or serialize it as null. Never generalize this to share/cursor pages.
+            if rows is None and path == '/file/get_file_list' and not cursor_mode:
+                empty_array = ('list' in data and data['list'] is None) or ('files' in data and data['files'] is None)
+                total = data.get('total')
+                if not data.get('hasMore') and (total in (0, '0') or (total is None and empty_array)):
+                    rows = []
             if not isinstance(rows, list):
                 raise CloudError('文件列表字段无法识别，需核对接口')
             ids = [str(x.get('id', x.get('fileId', ''))) for x in rows]
@@ -179,7 +186,7 @@ class Cloud:
             self.history_cache[parent] = (time.monotonic(), rows)
             return rows
 
-    async def prepare(self, share_id, code):
+    async def prepare(self, share_id, code, details=False):
         access = await self.call('/get_share_access_token', {'shareId': share_id, 'code': code})
         if not isinstance(access, dict) or not access.get('accessToken'):
             raise CloudError('分享访问令牌缺失')
@@ -192,7 +199,8 @@ class Cloud:
         title = '、'.join(names[:3])[:240]
         if len(names) > 3:
             title += f' 等 {len(names)} 项'
-        return token, [str(x.get('id', x.get('fileId'))) for x in rows], title
+        result = (token, [str(x.get('id', x.get('fileId'))) for x in rows], title)
+        return (*result, rows) if details else result
 
     async def submit(self, access, ids, parent):
         data = await self.call('/restore_share', {'accessToken': access, 'fileIds': ids, 'parentId': parent})
@@ -210,10 +218,10 @@ class Cloud:
             raise CloudError('临时目录 ID 异常')
         return folder
 
-    async def cleanup_manifest(self, parent, folder, name):
+    async def cleanup_manifest(self, parent, folder, name, root_verified=False):
         """Read only the normal directory tree; never enumerate the recycle bin."""
-        roots = await self.folders(parent)
-        if not folder or folder == parent or not any(x['id'] == folder and x['name'] == name for x in roots):
+        roots = [] if root_verified else await self.folders(parent)
+        if not folder or folder == parent or (not root_verified and not any(x['id'] == folder and x['name'] == name for x in roots)):
             raise CloudError('临时目录已移动、改名或不存在，停止自动删除')
         pending, seen, manifest = [folder], {folder}, []
         while pending:
@@ -236,10 +244,15 @@ class Cloud:
     async def delete_cleanup_folder(self, folder):
         if not folder:
             raise CloudError('缺少待删除目录 ID')
+        return await self.delete_cleanup_targets([folder])
+
+    async def delete_cleanup_targets(self, ids):
+        if not ids or any(not isinstance(x, str) or not x for x in ids):
+            raise CloudError('缺少待删除目标 ID')
         # Deliberately do not use call(): no automatic retry of this destructive request,
         # including after HTTP 401. A second delete can permanently erase recycled files.
         token = await self.token()
-        data = check(await self.raw(API + '/file/delete_file', {'fileIds': [folder]}, token)).get('data')
+        data = check(await self.raw(API + '/file/delete_file', {'fileIds': ids}, token)).get('data')
         if not isinstance(data, dict) or not data.get('taskId'):
             raise CloudError('删除提交结果不明，请手动核对')
         return str(data['taskId'])

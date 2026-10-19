@@ -1,8 +1,9 @@
 import asyncio
 import time
-import uuid
+import json
 import httpx
 from .cloud import CloudError, TaskFailed
+from .cleanup import legacy_manifest, file_spec, transferred_targets, targets_manifest
 
 
 class Worker:
@@ -15,12 +16,20 @@ class Worker:
             try:
                 if await self.cloud.task(job['remote_task']):
                     self.store.update_job(jid, status='success', error='', completed_at=time.time())
-                    if job['cleanup_enabled'] and job['cleanup_folder']:
+                    if job['cleanup_enabled']:
                         try:
-                            manifest = await self.cloud.cleanup_manifest(job['target_id'], job['cleanup_folder'], job['cleanup_name'])
+                            if job['cleanup_folder']:
+                                manifest = await self.cloud.cleanup_manifest(job['target_id'], job['cleanup_folder'], job['cleanup_name'])
+                            else:
+                                plan = json.loads(job['cleanup_plan'])
+                                rows = await self.cloud.pages('/file/get_file_list', {'parentId': job['target_id']})
+                                targets = transferred_targets(plan, rows)
+                                manifest = await targets_manifest(self.cloud, job['target_id'], targets)
+                                self.store.claim_cleanup(jid, [x['id'] for x in targets])
+                                self.store.update_job(jid, cleanup_targets=json.dumps(targets, ensure_ascii=False))
                             self.store.update_job(jid, cleanup_manifest=manifest, cleanup_state='pending')
                         except Exception:
-                            self.store.update_job(jid, cleanup_state='blocked', cleanup_error='转存已完成，但未能记录目录内容；不会自动删除')
+                            self.store.update_job(jid, cleanup_state='blocked', cleanup_error='转存已完成，但无法唯一定位新增资源或记录快照；不会自动删除')
                 else:
                     self.store.update_job(jid, next_at=time.time() + 30)
             except (CloudError, httpx.HTTPError) as error:
@@ -32,7 +41,10 @@ class Worker:
         attempts = job['attempts'] + 1
         self.store.update_job(jid, status='preparing', attempts=attempts)
         try:
-            access, ids, title = await self.cloud.prepare(job['share_id'], job['code'])
+            if job['cleanup_enabled']:
+                access, ids, title, source_rows = await self.cloud.prepare(job['share_id'], job['code'], details=True)
+            else:
+                access, ids, title = await self.cloud.prepare(job['share_id'], job['code'])
             if not job['resource_name'] and title:
                 self.store.update_job(jid, resource_name=title)
         except (CloudError, httpx.HTTPError) as error:
@@ -44,21 +56,17 @@ class Worker:
         parent = job['target_id']
         if job['cleanup_enabled']:
             try:
+                # Old empty temporary folders are not reused or deleted here.
                 if job['cleanup_folder']:
                     manifest = await self.cloud.cleanup_manifest(parent, job['cleanup_folder'], job['cleanup_name'])
                     if manifest != '[]':
-                        raise CloudError('临时目录已有内容，请手动核对后移走内容再重试')
-                    parent = job['cleanup_folder']
-                else:
-                    name = 'sbtg-' + str(jid) + '-' + uuid.uuid4().hex
-                    # Persist before a mutating request, including mkdir.
-                    self.store.update_job(jid, status='submitting', cleanup_name=name)
-                    parent = await self.cloud.create_cleanup_folder(parent, name)
-                    self.store.update_job(jid, cleanup_folder=parent)
-                    if await self.cloud.cleanup_manifest(job['target_id'], parent, name) != '[]':
-                        raise CloudError('新建临时目录非空，停止转存')
+                        raise CloudError('旧临时目录已有内容，请核对后移走内容再重试')
+                before = await self.cloud.pages('/file/get_file_list', {'parentId': parent})
+                plan = {'before': [file_spec(x) for x in before], 'source': [file_spec(x) for x in source_rows]}
+                self.store.update_job(jid, cleanup_plan=json.dumps(plan, ensure_ascii=False),
+                                      cleanup_folder='', cleanup_name='', cleanup_targets='')
             except Exception:
-                self.store.update_job(jid, status='uncertain', error='临时目录创建或检查未完成，请先核对云盘中的 sbtg 目录再重试')
+                self.store.update_job(jid, status='failed', error='保存目录读取或旧临时目录核对失败，未提交转存；请核对后重试')
                 return
         self.store.update_job(jid, status='submitting', error='')
         try:
@@ -84,10 +92,16 @@ class Worker:
             return
         if (not self.store.get('auto_cleanup', False) or job['status'] != 'success'
             or job['cleanup_state'] != 'pending' or not job['cleanup_enabled']
-            or not job['completed_at'] or time.time() - job['completed_at'] < 3600):
+            or (time.time() - job['completed_at'] < 3600 if job['completed_at'] is not None
+                else time.time() - job['created'] <= 7200)):
             return
         try:
-            manifest = await self.cloud.cleanup_manifest(job['target_id'], job['cleanup_folder'], job['cleanup_name'])
+            if job['cleanup_targets']:
+                manifest = await targets_manifest(self.cloud, job['target_id'], json.loads(job['cleanup_targets']))
+            elif job['completed_at'] is None:
+                manifest = await legacy_manifest(self.cloud, job['target_id'], job['cleanup_folder'], job['cleanup_name'])
+            else:
+                manifest = await self.cloud.cleanup_manifest(job['target_id'], job['cleanup_folder'], job['cleanup_name'])
             if not job['cleanup_manifest'] or manifest != job['cleanup_manifest']:
                 raise CloudError('目录内容已变化，停止自动删除')
         except Exception:
@@ -98,7 +112,10 @@ class Worker:
             return
         self.store.update_job(jid, cleanup_state='deleting', cleanup_error='')
         try:
-            task = await self.cloud.delete_cleanup_folder(job['cleanup_folder'])
+            if job['cleanup_targets']:
+                task = await self.cloud.delete_cleanup_targets([x['id'] for x in json.loads(job['cleanup_targets'])])
+            else:
+                task = await self.cloud.delete_cleanup_folder(job['cleanup_folder'])
         except Exception:
             self.store.update_job(jid, cleanup_state='uncertain', cleanup_error='删除结果不明，请手动核对；不会再次删除')
             return
@@ -108,8 +125,9 @@ class Worker:
         # Wall-clock timestamps are persisted; no in-memory one-hour timers.
         jobs = self.store.rows("""SELECT * FROM jobs WHERE status='success' AND cleanup_enabled=1
             AND cleanup_next<=? AND (cleanup_state='submitted' OR
-            (cleanup_state='pending' AND completed_at<=? AND ?=1)) ORDER BY completed_at,id LIMIT 1""",
-            (time.time(), time.time() - 3600, bool(self.store.get('auto_cleanup', False))))
+            (cleanup_state='pending' AND ((completed_at IS NOT NULL AND completed_at<=?)
+            OR (completed_at IS NULL AND created<?)) AND ?=1)) ORDER BY COALESCE(completed_at,created),id LIMIT 1""",
+            (time.time(), time.time() - 3600, time.time() - 7200, bool(self.store.get('auto_cleanup', False))))
         if jobs:
             await self.cleanup(jobs[0])
 

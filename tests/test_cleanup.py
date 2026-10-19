@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 from app.cloud import Cloud, CloudError, TaskFailed, API
-from app.cleanup import history_preview
+from app.cleanup import history_preview, queue_history, transferred_targets, file_spec
 from app.store import Store
 from app.worker import Worker
 
@@ -54,16 +54,16 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.cloud.delete_cleanup_folder.assert_not_awaited()
         self.assertEqual(self.store.rows('SELECT cleanup_enabled FROM jobs WHERE id=2')[0]['cleanup_enabled'], 1)
 
-    async def test_isolation_and_success_clock_not_submission_or_updated(self):
+    async def test_direct_destination_and_success_clock_not_submission_or_updated(self):
         self.store.set('auto_cleanup', True)
         self.enqueue()
-        self.cloud.prepare = AsyncMock(return_value=('access', ['source-file'], 'Title'))
+        self.cloud.prepare = AsyncMock(return_value=('access', ['source-file'], 'Title', [{'fileId':'source-file','fileName':'movie','resType':1,'fileSize':10}]))
         self.cloud.create_cleanup_folder = AsyncMock(return_value='own-folder')
-        self.cloud.cleanup_manifest = AsyncMock(side_effect=['[]', 'snapshot'])
+        self.cloud.pages = AsyncMock(side_effect=[[], [{'fileId':'owned','fileName':'movie','resType':1,'fileSize':10}], [{'fileId':'owned','fileName':'movie','resType':1,'fileSize':10}]])
         self.cloud.submit = AsyncMock(return_value='transfer-task')
         self.cloud.task = AsyncMock(return_value=True)
         await self.worker.process(self.job())
-        self.cloud.submit.assert_awaited_once_with('access', ['source-file'], 'own-folder')
+        self.cloud.submit.assert_awaited_once_with('access', ['source-file'], 'parent')
         self.assertIsNone(self.job()['completed_at'])
         with patch('app.worker.time.time', return_value=10000):
             await self.worker.process(self.job())
@@ -71,6 +71,23 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.store.update_job(1, resource_name='New title')
         self.assertEqual(self.job()['completed_at'], 10000)
         self.assertEqual(self.job()['cleanup_state'], 'pending')
+        self.assertEqual(self.job()['cleanup_folder'], '')
+        self.cloud.create_cleanup_folder.assert_not_awaited()
+        self.cloud.pages = AsyncMock(return_value=[{'fileId':'owned','fileName':'movie','resType':1,'fileSize':10}])
+        self.cloud.delete_cleanup_targets = AsyncMock(return_value='delete-task')
+        await self.worker.cleanup_due()
+        self.cloud.delete_cleanup_targets.assert_awaited_once_with(['owned'])
+
+    async def test_direct_mapping_excludes_existing_and_unrelated_resources(self):
+        source={'fileId':'source','fileName':'movie','resType':1,'fileSize':10}
+        new={**source,'fileId':'owned'}
+        unrelated={**source,'fileId':'unrelated','fileName':'other'}
+        plan={'source':[file_spec(source)],'before':[]}
+        self.assertEqual([x['id'] for x in transferred_targets(plan,[new,unrelated])],['owned'])
+        with self.assertRaises(ValueError):
+            transferred_targets({**plan,'before':[file_spec(new)]},[new])
+        with self.assertRaises(ValueError):
+            transferred_targets(plan,[new,{**new,'fileId':'duplicate'}])
 
     async def test_age_boundary_and_restart_poll_never_resubmits(self):
         self.due()
@@ -180,6 +197,7 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_history_preview_is_read_only_candidates_not_authority(self):
         self.enqueue()
         self.store.update_job(1, status='success')
+        self.store.execute('UPDATE jobs SET created=? WHERE id=1', (time.time()-7201,))
         before = self.job()
         self.cloud.pages = AsyncMock(return_value=[{'fileId': 'candidate', 'fileName': 'Example (2026)', 'resType': 2},
                                                   {'fileId': 'unrelated', 'fileName': 'Other', 'resType': 2}])
@@ -189,6 +207,43 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x['id'] for x in result['items'][0]['candidates']], ['candidate'])
         self.assertEqual(self.job(), before)
 
+    async def test_legacy_age_gate_and_file_cleanup(self):
+        self.enqueue()
+        self.store.update_job(1, status='success')
+        self.cloud.pages = AsyncMock(return_value=[{'fileId':'legacy-file','fileName':'Example (2026)','resType':1,'fileSize':10}])
+        self.store.execute('UPDATE jobs SET created=10000 WHERE id=1')
+        with patch('app.cleanup.time.time', return_value=17200):
+            with self.assertRaises(ValueError):
+                await queue_history(self.store,self.cloud,1,'legacy-file','Example (2026)')
+        self.cloud.pages.assert_not_awaited()
+        with patch('app.cleanup.time.time', return_value=17201):
+            await queue_history(self.store,self.cloud,1,'legacy-file','Example (2026)')
+        self.assertIsNone(self.job()['completed_at'])
+        self.store.set('auto_cleanup',True)
+        self.cloud.delete_cleanup_folder=AsyncMock(return_value='task')
+        await self.worker.cleanup_due()
+        self.cloud.delete_cleanup_folder.assert_awaited_once_with('legacy-file')
+
+    async def test_legacy_duplicate_target_and_failed_job_rejected(self):
+        self.enqueue()
+        self.enqueue('two')
+        self.store.execute("UPDATE jobs SET status='success',created=1")
+        self.cloud.pages=AsyncMock(return_value=[{'fileId':'same','fileName':'Example (2026)','resType':1}])
+        await queue_history(self.store,self.cloud,1,'same','Example (2026)')
+        with self.assertRaises(ValueError):
+            await queue_history(self.store,self.cloud,2,'same','Example (2026)')
+        self.store.update_job(2,status='failed')
+        with self.assertRaises(ValueError):
+            await queue_history(self.store,self.cloud,2,'same','Example (2026)')
+
+    async def test_young_history_preview_does_not_access_cloud(self):
+        self.enqueue()
+        self.store.update_job(1,status='success')
+        self.cloud.history_files=AsyncMock()
+        result=await history_preview(self.store,self.cloud)
+        self.assertFalse(result['items'][0]['eligible'])
+        self.cloud.history_files.assert_not_awaited()
+
     async def test_not_due_never_reads_cloud(self):
         self.due()
         self.store.update_job(1, completed_at=time.time())
@@ -197,14 +252,36 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.cloud.cleanup_manifest.assert_not_awaited()
         self.cloud.delete_cleanup_folder.assert_not_awaited()
 
+    async def test_empty_directory_protocol_and_unknown_schema(self):
+        for body in ({'total':0}, {'total':0,'list':None}, {'list':None}, {'files':None}, {'list':[]}):
+            self.cloud.call=AsyncMock(return_value=body)
+            self.assertEqual(await self.cloud.pages('/file/get_file_list',{}),[])
+        for body in ({}, {'total':1}, {'total':1,'list':None}, {'total':0,'hasMore':True}):
+            self.cloud.call=AsyncMock(return_value=body)
+            with self.assertRaises(CloudError):
+                await self.cloud.pages('/file/get_file_list',{})
+
+    async def test_retry_old_empty_folder_saves_directly_to_selected_parent(self):
+        self.store.set('auto_cleanup',True)
+        self.enqueue()
+        self.store.update_job(1,cleanup_folder='existing',cleanup_name='sbtg-existing')
+        self.cloud.prepare=AsyncMock(return_value=('access',['source'],'Title',[]))
+        self.cloud.cleanup_manifest=AsyncMock(return_value='[]')
+        self.cloud.pages=AsyncMock(return_value=[])
+        self.cloud.create_cleanup_folder=AsyncMock()
+        self.cloud.submit=AsyncMock(return_value='task')
+        await self.worker.process(self.job())
+        self.cloud.create_cleanup_folder.assert_not_awaited()
+        self.cloud.submit.assert_awaited_once_with('access',['source'],'parent')
+
     async def test_retry_does_not_merge_with_partial_transfer(self):
         self.due()
         self.store.update_job(1, status='queued')
-        self.cloud.prepare = AsyncMock(return_value=('access', ['source'], 'Title'))
+        self.cloud.prepare = AsyncMock(return_value=('access', ['source'], 'Title', []))
         self.cloud.submit = AsyncMock()
         await self.worker.process(self.job())
         self.cloud.submit.assert_not_awaited()
-        self.assertEqual(self.job()['status'], 'uncertain')
+        self.assertEqual(self.job()['status'], 'failed')
 
 
 class CleanupWebTests(unittest.TestCase):

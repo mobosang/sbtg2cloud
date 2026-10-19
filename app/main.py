@@ -18,7 +18,7 @@ from .cloud import Cloud, CloudError
 from .store import Store
 from .telegram import Telegram
 from .worker import Worker
-from .cleanup import history_preview
+from .cleanup import history_preview, queue_history
 
 DATA = Path(os.environ.get('DATA_DIR', './data'))
 STATIC = Path(__file__).parent / 'static'
@@ -131,6 +131,17 @@ async def cleanup_settings(value: CleanupSettings):
 @app.get('/api/cleanup/history')
 async def cleanup_history(page: int = Query(1, ge=1)):
     return await history_preview(app.state.store, app.state.cloud, page)
+
+
+class HistoryTarget(BaseModel):
+    file_id: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=2048)
+
+
+@app.post('/api/cleanup/history/{job_id}')
+async def cleanup_history_target(job_id: int, value: HistoryTarget):
+    await queue_history(app.state.store, app.state.cloud, job_id, value.file_id, value.name)
+    return {'ok': True}
 
 
 @app.post('/api/telegram/config')
@@ -287,6 +298,7 @@ async def jobs(before: int = 0):
       WHERE (?=0 OR j.id<?) ORDER BY j.id DESC LIMIT 100''', (before, before))
     for item in items:
         item.pop('cleanup_manifest', None)
+        item.pop('cleanup_plan', None)
     return items
 
 
@@ -310,6 +322,7 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
       WHERE j.id<=?''' + condition + ' ORDER BY j.id DESC LIMIT ? OFFSET ?', (max_id, *statuses, page_size, (page - 1) * page_size))
     for item in items:
         item.pop('cleanup_manifest', None)
+        item.pop('cleanup_plan', None)
     return {'items': items, 'page': page, 'page_size': page_size, 'pages': pages, 'total': total, 'max_id': max_id,
             'status_filter': status_filter}
 
