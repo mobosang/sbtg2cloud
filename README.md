@@ -59,26 +59,23 @@ docker build --platform linux/amd64 -t sbtg2cloud:local .
 
 镜像包含健康检查。数据目录应只允许服务用户和管理员访问。
 
-## 可选的单容器 HTTP 代理
+## 仅 Telegram 使用代理，光鸭直连
 
-默认代理变量为空，保持直连。仅支持 **HTTP CONNECT** 代理；没有实现或验证 SOCKS5、SOCKS4、MTProxy，也不接受 `https://` 代理协议。`HTTPS_PROXY` 表示 HTTPS 目标使用的代理，其值仍填写 `http://代理主机:端口`。
+推荐部署方式为 **Telegram 走 HTTP CONNECT 代理，光鸭直连**。仅支持 HTTP CONNECT；没有实现或验证 SOCKS5、SOCKS4、MTProxy，也不接受 `https://` 代理协议。未填写 Telegram 代理地址时，Telegram 也保持直连。
 
 在项目 `.env` 中按需填写（示例主机需自行替换，不要提交真实地址或密码）：
 
 ```env
 TELEGRAM_PROXY_URL=http://proxy.example:8080
-HTTP_PROXY=http://proxy.example:8080
-HTTPS_PROXY=http://proxy.example:8080
-NO_PROXY=localhost,127.0.0.1,::1
 ```
 
 - `TELEGRAM_PROXY_URL` 显式传给 Telethon；不配置则 Telegram 直连。它不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。
-- `HTTP_PROXY`、`HTTPS_PROXY` 由光鸭的 HTTPX 客户端读取。此前代码设置了 `trust_env=False`，本版已改为 `True`。只想让 Telegram 走代理时，其余代理变量保持为空即可。
-- `NO_PROXY` 仅影响 HTTPX；可填写明确的主机名或 IP。不能假设 HTTPX 支持 CIDR 网段匹配，本项目仅测试了精确主机匹配。不需要访问内网其他服务时，使用上面的本地地址即可。
-- 使用代理时始终建议显式填写端口。Telegram 未指定端口时默认 8080；HTTPX 遵循 HTTP URL 默认端口 80。
+- Compose 明确清空容器内的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及对应小写变量，并设置 `NO_PROXY=*`、`no_proxy=*`，保证光鸭 HTTPX 请求直连，避免 Docker 客户端的默认代理设置影响光鸭。无需在 `.env` 中配置这些通用代理变量；旧 `.env` 若有这些配置可以删除，当前 Compose 不再引用它们。
+- `NO_PROXY` 不影响 Telethon，所以光鸭直连不会绕过 Telegram 的显式代理。本示例使用 `*` 表示全部 HTTP 请求直连，不依赖 CIDR 网段匹配能力。
+- 建议显式填写代理端口；Telegram 未指定端口时默认 8080。
 - 带认证时使用 `http://用户名:密码@主机:端口`。用户名、密码必须非空；`@`、`:`、`#`、`%` 等特殊字符按 URL 规则编码，例如 `http://user%40domain:p%40ss%3Aword@proxy.example:8080`。若 Compose `.env` 的值含字面 `$`，使用单引号包裹该值，避免变量插值。
 
-Compose 已显式把上述变量传入 **sbtg2cloud 这一个容器**，不更改宿主机或其他容器。不要把代理地址写入源码或 Dockerfile。在 Unraid Docker 模板部署时，给同一个容器添加对应的环境变量，效果相同。
+Compose 只从 `.env` 读取 Telegram 代理地址，代理设置仅作用于 **sbtg2cloud 这一个容器**，不更改宿主机或其他容器。不要把真实代理地址写入源码或 Dockerfile。在 Unraid Docker 模板部署时，添加 `TELEGRAM_PROXY_URL`，将通用代理变量（含小写及 `ALL_PROXY`）清空，并设置 `NO_PROXY=*`、`no_proxy=*`，效果相同。
 
 升级代码/依赖后执行：
 

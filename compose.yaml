@@ -11,10 +11,17 @@ services:
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
+      # Only Telegram uses the proxy address from .env.
       TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+      # Keep Guangya direct even if Docker/client defaults contain proxy settings.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - ${APPDATA_PATH:-./data}:/data
     security_opt:
