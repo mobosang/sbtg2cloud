@@ -200,6 +200,30 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_stats_filters_cover_all_records_and_follow_status_changes(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):
+            with TestClient(main.app) as client:
+                headers = {'X-Sbtg-Client': 'web'}
+                store = main.app.state.store
+                def seed():
+                    for i in range(125):
+                        store.enqueue({'share_id':str(i),'url':'https://www.guangyapan.com/s/'+str(i),'code':''},
+                                      {'id':1,'target_id':None,'target_name':None}, i)
+                        store.update_job(i+1, status=('failed' if i==0 else 'uncertain' if i==1 else 'queued' if i<24 else 'success'))
+                client.portal.call(seed)
+                attention = client.get('/api/job-pages?status_filter=attention', headers=headers).json()
+                self.assertEqual(attention['total'],2)
+                self.assertEqual({j['status'] for j in attention['items']},{'failed','uncertain'})
+                queued = client.get('/api/job-pages?status_filter=queued&page_size=10&page=3', headers=headers).json()
+                self.assertEqual((queued['total'],queued['pages'],len(queued['items'])),(22,3,2))
+                self.assertTrue(all(j['status']=='queued' for j in queued['items']))
+                self.assertEqual(client.post('/api/jobs/1/retry', headers=headers,json={}).status_code,200)
+                self.assertEqual(client.get('/api/job-pages?status_filter=attention',headers=headers).json()['total'],1)
+                self.assertEqual(client.get('/api/job-pages?status_filter=queued',headers=headers).json()['total'],23)
+                self.assertEqual(client.get('/api/job-pages',headers=headers).json()['total'],125)
+                self.assertEqual(client.get('/api/job-pages?status_filter=invalid',headers=headers).status_code,422)
+
     def test_job_pagination_sizes_boundaries_and_snapshot(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):

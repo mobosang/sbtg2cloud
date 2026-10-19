@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let editingSources = false, visibleJobs = [], sourceList = [], folderStack = [], folderCallback, jobsPage = 1, jobsPages = 1, jobsPageSize = 20, jobsMaxId = null, jobsRequest = 0, toastTimer;
+let editingSources = false, visibleJobs = [], sourceList = [], folderStack = [], folderCallback, jobsFilter = 'all', jobsPage = 1, jobsPages = 1, jobsPageSize = 20, jobsMaxId = null, jobsRequest = 0, toastTimer;
 const states = {proxy_config_error:'代理配置错误',not_configured:'未配置',connecting:'连接中',connected:'已连接',disconnected:'连接中断',login_required:'待登录',scan_qr:'等待扫码',password_required:'需要两步验证',qr_expired:'二维码已过期',authorized:'已授权',expired:'二维码已过期',failed:'失败',idle:'未登录'};
 const jobStates = {queued:'排队中',preparing:'读取分享',submitting:'正在提交',submitted:'云端处理中',success:'已完成',failed:'失败',uncertain:'结果待核对'};
 function text(tag, value, cls) { const e=document.createElement(tag); e.textContent=value; if(cls)e.className=cls; return e; }
@@ -82,7 +82,7 @@ action('folder-select',async()=>{await folderCallback({id:folderStack.at(-1).id,
 async function refreshJobs(){
   const request=++jobsRequest;
   const snapshot=jobsMaxId===null?'':'&max_id='+jobsMaxId;
-  const result=await api('/job-pages?page='+jobsPage+'&page_size='+jobsPageSize+snapshot);
+  const result=await api('/job-pages?page='+jobsPage+'&page_size='+jobsPageSize+'&status_filter='+jobsFilter+snapshot);
   if(request!==jobsRequest)return;
   jobsPage=result.page;jobsPages=result.pages;
   // First page follows incoming messages; older pages retain their snapshot boundary.
@@ -92,7 +92,15 @@ async function refreshJobs(){
   $('next-jobs').disabled=jobsPage>=jobsPages;
   $('page-number').value=jobsPage;$('page-number').max=jobsPages;
   $('page-summary').textContent='第 '+jobsPage+' / '+jobsPages+' 页 · 共 '+result.total+' 条';
-  const jobs=result.items;visibleJobs=jobs;$('jobs').replaceChildren();for(const job of jobs){const row=document.createElement('tr'),share=document.createElement('td'),link=text('a',job.resource_name||'资源名称待补全');link.href=job.url;link.target='_blank';link.rel='noreferrer';share.append(link,text('small',job.share_id),text('small',(job.source_title||'未知来源')+' · '+new Date(job.created*1000).toLocaleString()));const status=text('td',jobStates[job.status]||job.status);if(job.error)status.append(text('small',job.error,'job-error'));const operations=document.createElement('td');if(['failed','uncertain'].includes(job.status)){const b=text('button','重试 / 补码','secondary');b.onclick=async()=>{if(job.status==='uncertain'&&!confirm('请先检查云盘。确认这次分享尚未转存，仍要重新提交吗？'))return;const code=prompt('补填提取码（留空保留原值）：','');if(code===null)return;b.disabled=true;try{await api('/jobs/'+job.id+'/retry',{code,confirm_uncertain:job.status==='uncertain'});await refreshJobs();}catch(e){toast(e.message);}finally{b.disabled=false;}};operations.append(b);}row.append(share,text('td',job.target_name),status,operations);$('jobs').append(row);}if(!jobs.length){const r=document.createElement('tr'),c=text('td','暂无记录。启用监听后，新发现的分享会出现在这里。','empty');c.colSpan=4;r.append(c);$('jobs').append(r);}}
+  const jobs=result.items;visibleJobs=jobs;$('jobs').replaceChildren();for(const job of jobs){const row=document.createElement('tr'),share=document.createElement('td'),link=text('a',job.resource_name||'资源名称待补全');link.href=job.url;link.target='_blank';link.rel='noreferrer';share.append(link,text('small',job.share_id),text('small',(job.source_title||'未知来源')+' · '+new Date(job.created*1000).toLocaleString()));const status=text('td',jobStates[job.status]||job.status);if(job.error)status.append(text('small',job.error,'job-error'));const operations=document.createElement('td');if(['failed','uncertain'].includes(job.status)){const b=text('button','重试 / 补码','secondary');b.onclick=async()=>{if(job.status==='uncertain'&&!confirm('请先检查云盘。确认这次分享尚未转存，仍要重新提交吗？'))return;const code=prompt('补填提取码（留空保留原值）：','');if(code===null)return;b.disabled=true;try{await api('/jobs/'+job.id+'/retry',{code,confirm_uncertain:job.status==='uncertain'});await refreshJobs();}catch(e){toast(e.message);}finally{b.disabled=false;}};operations.append(b);}row.append(share,text('td',job.target_name),status,operations);$('jobs').append(row);}if(!jobs.length){const r=document.createElement('tr'),c=text('td',jobsFilter==='all'?'暂无记录。启用监听后，新发现的分享会出现在这里。':jobsFilter==='queued'?'暂无待处理记录。':'暂无需要处理的记录。','empty');c.colSpan=4;r.append(c);$('jobs').append(r);}}
+async function filterJobs(value,scroll=false){
+  jobsFilter=value;jobsPage=1;jobsMaxId=null;$('job-filter').value=value;
+  if(scroll){$('jobs-heading').focus({preventScroll:true});$('jobs-section').scrollIntoView({behavior:'smooth',block:'start'});}
+  await refreshJobs();
+}
+action('show-queued',()=>filterJobs('queued',true));
+action('show-attention',()=>filterJobs('attention',true));
+$('job-filter').onchange=e=>filterJobs(e.target.value).catch(error=>toast(error.message));
 action('fill-titles',async()=>{
   const missing=visibleJobs.filter(j=>!j.resource_name);
   if(!missing.length){toast('本页资源名称已齐全');return;}

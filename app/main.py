@@ -272,18 +272,24 @@ async def jobs(before: int = 0):
 
 @app.get('/api/job-pages')
 async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
-                    max_id: int | None = Query(None, ge=0)):
+                    max_id: int | None = Query(None, ge=0), status_filter: str = 'all'):
     if page_size not in (10, 20, 50, 100):
         raise HTTPException(422, '每页数量只支持 10、20、50、100')
     store = app.state.store
+    filters = {'all': (), 'queued': ('queued',), 'attention': ('failed', 'uncertain')}
+    if status_filter not in filters:
+        raise HTTPException(422, '不支持的记录筛选条件')
+    statuses = filters[status_filter]
+    condition = ' AND j.status IN (' + ','.join('?' for _ in statuses) + ')' if statuses else ''
     if max_id is None:
         max_id = store.rows('SELECT COALESCE(MAX(id),0) n FROM jobs')[0]['n']
-    total = store.rows('SELECT COUNT(*) n FROM jobs WHERE id<=?', (max_id,))[0]['n']
+    total = store.rows('SELECT COUNT(*) n FROM jobs j WHERE j.id<=?' + condition, (max_id, *statuses))[0]['n']
     pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, pages)
     items = store.rows('''SELECT j.*,s.title source_title FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
-      WHERE j.id<=? ORDER BY j.id DESC LIMIT ? OFFSET ?''', (max_id, page_size, (page - 1) * page_size))
-    return {'items': items, 'page': page, 'page_size': page_size, 'pages': pages, 'total': total, 'max_id': max_id}
+      WHERE j.id<=?''' + condition + ' ORDER BY j.id DESC LIMIT ? OFFSET ?', (max_id, *statuses, page_size, (page - 1) * page_size))
+    return {'items': items, 'page': page, 'page_size': page_size, 'pages': pages, 'total': total, 'max_id': max_id,
+            'status_filter': status_filter}
 
 
 @app.post('/api/jobs/{job_id}/title')
