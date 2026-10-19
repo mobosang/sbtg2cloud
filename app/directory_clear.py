@@ -10,6 +10,20 @@ from .cleanup import file_spec
 class DirectoryClear:
     def __init__(self, store, cloud):
         self.store, self.cloud = store, cloud
+        self.reconcile_completed()
+
+    def reconcile_completed(self):
+        """Only a confirmed successful clear receipt can settle overlapping cleanup."""
+        completed = {}
+        for part in self.store.rows("SELECT c.parent_id,p.ids FROM directory_clear_parts p JOIN directory_clears c ON c.id=p.clear_id WHERE p.state='done'"):
+            completed.setdefault(part['parent_id'], set()).update(json.loads(part['ids']))
+        for job in self.store.rows("SELECT * FROM jobs WHERE status='success' AND cleanup_state IN ('pending','blocked') AND cleanup_task=''"):
+            try:
+                ids = {x['id'] for x in json.loads(job['cleanup_targets'])} if job['cleanup_targets'] else {job['cleanup_folder']}
+            except (ValueError, KeyError, TypeError):
+                continue
+            if ids and '' not in ids and ids <= completed.get(job['target_id'], set()):
+                self.store.update_job(job['id'], cleanup_state='done', cleanup_error='已通过一键清空移入回收站')
 
     def targets(self):
         default = self.store.get('target', {'id': '', 'name': '/'})
@@ -96,6 +110,7 @@ class DirectoryClear:
             try:
                 if await self.cloud.task(part['task']):
                     self.store.execute("UPDATE directory_clear_parts SET state='done' WHERE clear_id=? AND part=?",(token,part['part']))
+                    self.reconcile_completed()
                 else:
                     self.store.execute('UPDATE directory_clear_parts SET next_at=? WHERE clear_id=? AND part=?',(time.time()+60,token,part['part']))
             except TaskFailed:

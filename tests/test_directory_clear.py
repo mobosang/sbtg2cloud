@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -45,6 +46,27 @@ class ClearTests(unittest.IsolatedAsyncioTestCase):
         self.cloud.delete_cleanup_targets.assert_awaited_once()
         with self.assertRaises(ValueError):
             await self.clear.preview('parent')
+
+    async def test_confirmed_clear_settles_only_fully_covered_cleanup(self):
+        for key, ids in [('one',['a']),('two',['b','outside']),('three',['a'])]:
+            self.store.enqueue({'share_id':key,'url':'https://example.com','code':''},
+                               {'id':1,'target_id':'parent','target_name':'/Media'},1,key)
+            jid = len(self.store.rows('SELECT id FROM jobs'))
+            self.store.update_job(jid,status='success',cleanup_enabled=1,cleanup_state='blocked',
+                                  cleanup_targets=json.dumps([{'id':x} for x in ids]))
+        self.store.update_job(3,cleanup_state='uncertain')
+        preview=await self.clear.preview('parent')
+        self.clear.confirm(preview['id'])
+        await self.clear.step()
+        self.assertEqual(self.store.rows('SELECT cleanup_state FROM jobs WHERE id=1')[0]['cleanup_state'],'blocked')
+        self.store.execute('UPDATE directory_clear_parts SET next_at=0')
+        await self.clear.step()
+        self.assertEqual([x['cleanup_state'] for x in self.store.rows('SELECT cleanup_state FROM jobs ORDER BY id')],
+                         ['done','blocked','uncertain'])
+        self.store.update_job(1,cleanup_state='blocked')
+        DirectoryClear(self.store,self.cloud)
+        self.assertEqual(self.store.rows('SELECT cleanup_state FROM jobs WHERE id=1')[0]['cleanup_state'],'done')
+        self.cloud.delete_cleanup_targets.assert_awaited_once()
 
     async def test_preview_timeout_does_not_queue_deletion(self):
         self.cloud.pages.side_effect = TimeoutError()

@@ -104,10 +104,26 @@ class Worker:
                 manifest = await legacy_manifest(self.cloud, job['target_id'], job['cleanup_folder'], job['cleanup_name'])
             else:
                 manifest = await self.cloud.cleanup_manifest(job['target_id'], job['cleanup_folder'], job['cleanup_name'])
-            if not job['cleanup_manifest'] or manifest != job['cleanup_manifest']:
-                raise CloudError('目录内容已变化，停止自动删除')
+            if not job['cleanup_manifest']:
+                raise CloudError('缺少转存时的内容快照，不能确认删除范围')
+            if manifest != job['cleanup_manifest']:
+                raise CloudError('当前文件清单与转存时快照不同，已停止删除；请检查新增、移走或修改的文件')
+        except (httpx.TransportError, TimeoutError):
+            self.store.update_job(jid, cleanup_next=time.time() + 300,
+                                  cleanup_error='读取云盘超时或网络暂不可用，未提交删除；5 分钟后重新核对')
+            return
+        except CloudError as error:
+            if error.retryable:
+                self.store.update_job(jid, cleanup_next=time.time() + 300,
+                                      cleanup_error='云盘限流或服务暂不可用，未提交删除；5 分钟后重新核对')
+            else:
+                self.store.update_job(jid, cleanup_state='blocked', cleanup_error='清理核对失败：' + str(error))
+            return
+        except ValueError:
+            self.store.update_job(jid, cleanup_state='blocked', cleanup_error='原目标已移动、改名、不存在或记录无法解析；未提交删除，不会按同名文件替代')
+            return
         except Exception:
-            self.store.update_job(jid, cleanup_state='blocked', cleanup_error='目录位置或内容变化，或核对失败；请手动检查，不会自动删除')
+            self.store.update_job(jid, cleanup_state='blocked', cleanup_error='清理核对发生内部异常，未提交删除；请更新版本后重新核对')
             return
         # A user can turn cleanup off while the read-only check is awaiting the network.
         if (not self.store.get('auto_cleanup', False)

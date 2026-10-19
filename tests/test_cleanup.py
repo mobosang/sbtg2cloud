@@ -143,6 +143,35 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.job()['cleanup_state'], 'blocked')
         self.cloud.delete_cleanup_folder.assert_not_awaited()
 
+    async def test_transient_read_failure_defers_without_deleting(self):
+        self.due()
+        for error in (httpx.ReadTimeout('secret-url'), CloudError('busy', retryable=True)):
+            self.store.update_job(1, cleanup_state='pending', cleanup_next=0)
+            self.cloud.cleanup_manifest.side_effect = error
+            await self.worker.cleanup_due()
+            self.assertEqual(self.job()['cleanup_state'], 'pending')
+            self.assertGreater(self.job()['cleanup_next'], time.time() + 290)
+            self.assertNotIn('secret', self.job()['cleanup_error'])
+            self.cloud.cleanup_manifest.reset_mock()
+            await self.worker.cleanup_due()
+            self.cloud.cleanup_manifest.assert_not_awaited()
+        self.cloud.cleanup_manifest.side_effect = None
+        self.store.update_job(1, cleanup_next=0)
+        await self.worker.cleanup_due()
+        self.cloud.delete_cleanup_folder.assert_awaited_once()
+
+    async def test_missing_target_and_changed_snapshot_are_distinct(self):
+        self.due()
+        self.cloud.cleanup_manifest.side_effect = ValueError('missing')
+        await self.worker.cleanup_due()
+        self.assertIn('不存在', self.job()['cleanup_error'])
+        self.store.update_job(1, cleanup_state='pending')
+        self.cloud.cleanup_manifest.side_effect = None
+        self.cloud.cleanup_manifest.return_value = 'changed'
+        await self.worker.cleanup_due()
+        self.assertIn('快照不同', self.job()['cleanup_error'])
+        self.cloud.delete_cleanup_folder.assert_not_awaited()
+
     async def test_timeout_never_retries_and_crash_recovers_uncertain(self):
         self.due()
         self.cloud.delete_cleanup_folder.side_effect = httpx.ReadTimeout('secret-url')
