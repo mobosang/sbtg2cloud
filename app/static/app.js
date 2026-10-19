@@ -6,8 +6,8 @@ const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',subm
 let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false;
 function text(tag, value, cls) { const e=document.createElement(tag); e.textContent=value; if(cls)e.className=cls; return e; }
 function toast(message) { $('notice').textContent=message; $('notice').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('notice').hidden=true,7000); }
-async function api(path, body) {
-  const options={headers:{'X-Sbtg-Client':'web'}};
+async function api(path, body, signal) {
+  const options={headers:{'X-Sbtg-Client':'web'},signal};
   if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
   const response=await fetch('/api'+path,options), data=await response.json();
   if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:'输入格式有误，请检查填写内容');
@@ -59,20 +59,33 @@ action('open-clear',async()=>{
   if(!targets.length){toast('请先选择一个非根目录作为转存目录');return;}
   $('clear-dialog').showModal();
 });
-$('clear-target').onchange=()=>{clearToken=null;$('confirm-clear').disabled=true;$('clear-items').replaceChildren();$('clear-summary').textContent='请重新预览所选目录';};
+let clearPreviewRequest=null;
+function cancelClearPreview(){if(clearPreviewRequest)clearPreviewRequest.abort();clearPreviewRequest=null;clearToken=null;$('confirm-clear').disabled=true;}
+$('clear-target').onchange=()=>{cancelClearPreview();$('clear-items').replaceChildren();$('clear-summary').textContent='请重新预览所选目录';};
+$('clear-dialog').addEventListener('close',cancelClearPreview);
+$('clear-dialog').addEventListener('cancel',cancelClearPreview);
 action('close-clear',()=>$('clear-dialog').close());
 action('preview-clear',async()=>{
-  clearToken=null;$('confirm-clear').disabled=true;const parent=$('clear-target').value;
+  cancelClearPreview();const parent=$('clear-target').value;
+  const request=new AbortController();clearPreviewRequest=request;
+  const timer=setTimeout(()=>request.abort(),50000);
+  $('clear-items').replaceChildren();
   $('clear-summary').textContent='正在读取目录…';
-  const result=await api('/clear/preview',{id:parent});
-  if($('clear-target').value!==parent)return;
-  clearToken=result.id;$('clear-summary').textContent=result.name+'：'+result.files+' 个顶层文件、'+result.folders+' 个文件夹（含全部内部内容）。不受自动清理等待时间限制。';
-  $('clear-items').replaceChildren();for(const item of result.items)$('clear-items').append(text('p',(item.kind===2?'文件夹：':'文件：')+item.name));
-  $('confirm-clear').disabled=result.count===0;
+  try{
+    const result=await api('/clear/preview',{id:parent},request.signal);
+    if(clearPreviewRequest!==request)return;
+    clearToken=result.id;$('clear-summary').textContent=result.name+'：'+result.files+' 个顶层文件、'+result.folders+' 个文件夹（含全部内部内容）。不受自动清理等待时间限制。';
+    for(const item of result.items)$('clear-items').append(text('p',(item.kind===2?'文件夹：':'文件：')+item.name));
+    $('confirm-clear').disabled=result.count===0;
+  }catch(error){
+    if(clearPreviewRequest===request)$('clear-summary').textContent=error.name==='AbortError'?'读取目录超时，未提交删除。请稍后重新预览。':'预览失败：'+error.message+'。未提交删除，请稍后重新预览。';
+  }finally{clearTimeout(timer);if(clearPreviewRequest===request)clearPreviewRequest=null;}
 });
 action('confirm-clear',async()=>{
   if(!clearToken)return;
-  await api('/clear/'+clearToken+'/confirm',{});clearToken=null;$('clear-dialog').close();await refreshState();toast('已提交清空请求；页面会显示各批次处理进度');
+  try{await api('/clear/'+clearToken+'/confirm',{});}
+  catch(error){$('clear-summary').textContent='提交未获确认：'+error.message+'。请核对页面清空状态；不要重复创建清空任务。';return;}
+  clearToken=null;$('clear-dialog').close();await refreshState();toast('已提交清空请求；页面会显示各批次处理进度');
 });
 action('toggle-cleanup',async()=>{
   const enabled=!cleanupEnabled;

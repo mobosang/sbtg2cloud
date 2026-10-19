@@ -46,6 +46,13 @@ class ClearTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.clear.preview('parent')
 
+    async def test_preview_timeout_does_not_queue_deletion(self):
+        self.cloud.pages.side_effect = TimeoutError()
+        with self.assertRaisesRegex(ValueError, '读取目录超时'):
+            await self.clear.preview('parent')
+        self.assertEqual(self.store.rows('SELECT * FROM directory_clears'), [])
+        self.cloud.delete_cleanup_targets.assert_not_awaited()
+
     async def test_empty_root_and_unknown_destinations(self):
         for parent in ('','unknown'):
             with self.assertRaises(ValueError):

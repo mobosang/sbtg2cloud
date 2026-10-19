@@ -1,4 +1,5 @@
 """User-confirmed clearing of a destination's children, never the parent itself."""
+import asyncio
 import json
 import time
 import uuid
@@ -27,7 +28,11 @@ class DirectoryClear:
             raise ValueError('请选择已配置的转存目录；不支持清空云盘根目录')
         if self.busy():
             raise ValueError('有云端任务正在处理，请完成后再清空目录')
-        rows = await self.cloud.pages('/file/get_file_list', {'parentId': parent})
+        try:
+            rows = await asyncio.wait_for(
+                self.cloud.pages('/file/get_file_list', {'parentId': parent}), timeout=45)
+        except TimeoutError:
+            raise ValueError('读取目录超时，可能正在等待云盘限流或网络响应；未提交删除，请稍后重新预览') from None
         items = [file_spec(x) for x in rows]
         if any(not x['id'] or x['id'] == parent or x['kind'] not in (1, 2) for x in items):
             raise ValueError('目录内容无法完整识别，已停止')
