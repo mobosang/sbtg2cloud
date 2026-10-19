@@ -3,7 +3,7 @@ import time
 import json
 import httpx
 from .cloud import CloudError, TaskFailed
-from .cleanup import legacy_manifest, file_spec, transferred_targets, targets_manifest
+from .cleanup import legacy_manifest, file_spec, transferred_targets, targets_manifest, cleanup_snapshot_matches, resume_reduced_cleanup
 from .directory_clear import DirectoryClear
 
 
@@ -11,6 +11,7 @@ class Worker:
     def __init__(self, store, cloud):
         self.store, self.cloud = store, cloud
         self.directory_clear = DirectoryClear(store, cloud)
+        resume_reduced_cleanup(store)
 
     async def process(self, job):
         jid = job['id']
@@ -106,8 +107,8 @@ class Worker:
                 manifest = await self.cloud.cleanup_manifest(job['target_id'], job['cleanup_folder'], job['cleanup_name'])
             if not job['cleanup_manifest']:
                 raise CloudError('缺少转存时的内容快照，不能确认删除范围')
-            if manifest != job['cleanup_manifest']:
-                raise CloudError('当前文件清单与转存时快照不同，已停止删除；请检查新增、移走或修改的文件')
+            if not cleanup_snapshot_matches(job['cleanup_manifest'], manifest, bool(job['cleanup_targets'])):
+                raise CloudError('当前文件清单与原快照不同：存在新增、修改、移动或快照异常；仅减少文件才允许清理')
         except (httpx.TransportError, TimeoutError):
             self.store.update_job(jid, cleanup_next=time.time() + 300,
                                   cleanup_error='读取云盘超时或网络暂不可用，未提交删除；5 分钟后重新核对')

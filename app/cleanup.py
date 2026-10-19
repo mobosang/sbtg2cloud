@@ -4,6 +4,61 @@ import time
 import json
 
 
+def cleanup_snapshot_matches(original, current, multiple_targets=False):
+    """Allow removed descendants only; surviving IDs retain every recorded field."""
+    def compatible(old, new):
+        if not isinstance(old, list) or not isinstance(new, list):
+            return False
+        # A standalone file fingerprint must remain entirely unchanged.
+        if len(old) == 6 and isinstance(old[0], str):
+            return old == new
+        def indexed(rows):
+            result = {}
+            for row in rows:
+                if (not isinstance(row, list) or len(row) != 8
+                        or not isinstance(row[1], str) or not row[1]
+                        or row[2] not in (1, 2) or row[1] in result):
+                    raise ValueError('invalid tree snapshot')
+                result[row[1]] = row
+            return result
+        before, after = indexed(old), indexed(new)
+        return all(fid in before and row == before[fid] for fid, row in after.items())
+    try:
+        old, new = json.loads(original), json.loads(current)
+        if multiple_targets:
+            # Roots are still verified by ID/name before producing each manifest.
+            return (isinstance(old, list) and isinstance(new, list) and len(old) == len(new)
+                    and bool(old) and all(compatible(json.loads(a), json.loads(b)) for a, b in zip(old, new)))
+        return compatible(old, new)
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def resume_reduced_cleanup(store):
+    """One-time recheck of pre-delete mismatches, never submitted/uncertain deletes."""
+    if store.get('cleanup_reduced_snapshot_v1', False):
+        return
+    errors = {
+        '目录位置或内容变化，或核对失败；请手动检查，不会自动删除',
+        '清理核对失败：当前文件清单与转存时快照不同，已停止删除；请检查新增、移走或修改的文件',
+    }
+    for job in store.rows("SELECT * FROM jobs WHERE status='success' AND cleanup_enabled=1 AND cleanup_state='blocked' AND cleanup_task='' AND cleanup_manifest!=''"):
+        if job['cleanup_error'] not in errors:
+            continue
+        try:
+            ids = [x['id'] for x in json.loads(job['cleanup_targets'])] if job['cleanup_targets'] else [job['cleanup_folder']]
+            if not ids or any(not fid for fid in ids):
+                continue
+            if any(not store.rows('SELECT file_id FROM cleanup_claims WHERE file_id=? AND job_id=?', (fid, job['id']))
+                   or store.rows('SELECT file_id FROM directory_clear_claims WHERE file_id=?', (fid,)) for fid in ids):
+                continue
+        except (ValueError, TypeError, KeyError):
+            continue
+        store.update_job(job['id'], cleanup_state='pending', cleanup_next=0,
+                         cleanup_error='等待按仅减少文件规则重新核对原快照，尚未提交删除')
+    store.set('cleanup_reduced_snapshot_v1', True)
+
+
 def file_spec(row):
     return {'id': str(row.get('fileId') or row.get('id') or ''),
             'name': row.get('fileName') or row.get('name') or '', 'kind': row.get('resType'),

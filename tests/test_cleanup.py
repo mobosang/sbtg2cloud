@@ -1,3 +1,4 @@
+import json
 import tempfile
 import asyncio
 import time
@@ -38,8 +39,8 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.enqueue()
         self.store.update_job(1, status='success', completed_at=time.time()-3601,
                               cleanup_folder='own-folder', cleanup_name='sbtg-test',
-                              cleanup_manifest='snapshot', cleanup_state='pending')
-        self.cloud.cleanup_manifest = AsyncMock(return_value='snapshot')
+                              cleanup_manifest='[]', cleanup_state='pending')
+        self.cloud.cleanup_manifest = AsyncMock(return_value='[]')
         self.cloud.delete_cleanup_folder = AsyncMock(return_value='delete-task')
 
     async def test_default_and_legacy_are_never_scheduled(self):
@@ -120,7 +121,7 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.due()
         async def checking(*args):
             self.store.set('auto_cleanup', False)
-            return 'snapshot'
+            return '[]'
         self.cloud.cleanup_manifest.side_effect = checking
         await self.worker.cleanup_due()
         self.cloud.delete_cleanup_folder.assert_not_awaited()
@@ -129,10 +130,25 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.due()
         async def checking(*args):
             self.store.set('cleanup_minutes',600)
-            return 'snapshot'
+            return '[]'
         self.cloud.cleanup_manifest.side_effect=checking
         await self.worker.cleanup_due()
         self.cloud.delete_cleanup_folder.assert_not_awaited()
+
+    async def test_due_cleanup_accepts_reduced_snapshot_without_replacing_it(self):
+        self.due()
+        before = [['own-folder','one',1,'ep1',10,None,None,None],
+                  ['own-folder','two',1,'ep2',20,None,None,None]]
+        original = json.dumps([json.dumps(before)])
+        self.store.update_job(1, cleanup_targets=json.dumps([{'id':'own-folder','name':'series'}]),
+                              cleanup_manifest=original)
+        self.cloud.pages = AsyncMock(return_value=[{'fileId':'own-folder','fileName':'series','resType':2}])
+        self.cloud.cleanup_manifest = AsyncMock(return_value=json.dumps(before[1:]))
+        self.cloud.delete_cleanup_targets = AsyncMock(return_value='delete-task')
+        await self.worker.cleanup_due()
+        self.assertEqual(self.job()['cleanup_state'], 'submitted')
+        self.assertEqual(self.job()['cleanup_manifest'], original)
+        self.cloud.delete_cleanup_targets.assert_awaited_once_with(['own-folder'])
 
     async def test_changed_or_unreadable_tree_blocks_delete(self):
         self.due()
