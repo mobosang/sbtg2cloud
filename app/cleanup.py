@@ -51,7 +51,8 @@ async def history_preview(store, cloud, page=1):
     result = []
     for job in jobs:
         parent = job['target_id']
-        eligible = time.time() - job['created'] > 7200
+        delay = store.get('cleanup_minutes', 60) * 60
+        eligible = time.time() - job['created'] >= delay
         if eligible and parent not in directories:
             try:
                 directories[parent] = await cloud.history_files(parent)
@@ -67,10 +68,10 @@ async def history_preview(store, cloud, page=1):
                 if key and (name == job['resource_name'] or (len(key) >= 2 and key == other)):
                     candidates.append({'id': str(row.get('fileId') or row.get('id') or ''),
                                        'name': name, 'folder': row.get('resType') == 2})
-        result.append({**job, 'candidates': candidates, 'eligible': eligible, 'due_at': job['created'] + 7200,
-                       'note': '任务创建尚未超过两小时，不请求云盘、不删除' if not eligible else
+        result.append({**job, 'candidates': candidates, 'eligible': eligible, 'due_at': job['created'] + delay,
+                       'note': '尚未达到配置的等待时间，不请求云盘、不删除' if not eligible else
                        '无法读取保存目录，请检查登录或网络' if rows is None else
-                       '已成功且创建超过两小时；请选择对应的实际文件或文件夹加入清理' if candidates else
+                       '已成功且达到等待时间；请选择对应的实际文件或文件夹加入清理' if candidates else
                        '未找到同名目标；可能已改名、移动或名称不同，不会自动删除'})
     return {'items': result, 'page': page, 'pages': pages, 'total': total}
 
@@ -95,8 +96,8 @@ async def queue_history(store, cloud, job_id, file_id, name):
     if not jobs or jobs[0]['status'] != 'success' or jobs[0]['completed_at'] is not None:
         raise ValueError('只支持缺少成功时间的历史成功任务')
     job = jobs[0]
-    if time.time() - job['created'] <= 7200:
-        raise ValueError('任务创建时间尚未超过两小时')
+    if time.time() - job['created'] < store.get('cleanup_minutes', 60) * 60:
+        raise ValueError('尚未达到配置的等待时间')
     if not title_key(job['resource_name']) or title_key(name) != title_key(job['resource_name']):
         raise ValueError('目标名称与历史任务不匹配')
     if store.rows('SELECT id FROM jobs WHERE cleanup_enabled=1 AND (id=? OR cleanup_folder=?)', (job_id, file_id)):

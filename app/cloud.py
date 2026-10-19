@@ -47,6 +47,7 @@ class Cloud:
             self.http = httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False)
         self.lock = asyncio.Lock()
         self.request_lock = asyncio.Lock()
+        self.operation_lock = asyncio.Lock()
         self.next_request_at = 0.0
         self.history_lock = asyncio.Lock()
         self.history_cache = {}

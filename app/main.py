@@ -19,6 +19,7 @@ from .store import Store
 from .telegram import Telegram
 from .worker import Worker
 from .cleanup import history_preview, queue_history
+from .directory_clear import DirectoryClear
 
 DATA = Path(os.environ.get('DATA_DIR', './data'))
 STATIC = Path(__file__).parent / 'static'
@@ -39,6 +40,7 @@ async def lifespan(app):
     cloud = Cloud(store)
     tg = Telegram(store, DATA)
     app.state.store, app.state.cloud, app.state.tg = store, cloud, tg
+    app.state.directory_clear = DirectoryClear(store, cloud)
     app.state.cloud_qr = {'state': 'idle'}
     app.state.cloud_login_task = None
     tasks = [asyncio.create_task(tg.run()), asyncio.create_task(Worker(store, cloud).run())]
@@ -109,6 +111,8 @@ async def state():
         'cloud': {'configured': bool(store.get('cloud_token')), 'error': cloud.login_error, **app.state.cloud_qr},
         'target': store.get('target', {'id': '', 'name': '/'}),
         'auto_cleanup': bool(store.get('auto_cleanup', False)),
+        'cleanup_minutes': store.get('cleanup_minutes', 60),
+        'directory_clear': app.state.directory_clear.latest(),
         'counts': {r['status']: r['n'] for r in store.rows('SELECT status,COUNT(*) n FROM jobs GROUP BY status')},
     }
 
@@ -120,6 +124,36 @@ class Credentials(BaseModel):
 
 class CleanupSettings(BaseModel):
     enabled: bool
+
+
+class CleanupDelay(BaseModel):
+    minutes: int = Field(ge=5, le=600, strict=True)
+
+
+@app.post('/api/cleanup/delay')
+async def cleanup_delay(value: CleanupDelay):
+    app.state.store.set('cleanup_minutes', value.minutes)
+    return {'ok': True}
+
+
+@app.get('/api/clear/targets')
+async def clear_targets():
+    return app.state.directory_clear.targets()
+
+
+class ClearTarget(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+
+
+@app.post('/api/clear/preview')
+async def clear_preview(value: ClearTarget):
+    return await app.state.directory_clear.preview(value.id)
+
+
+@app.post('/api/clear/{token}/confirm')
+async def clear_confirm(token: str):
+    app.state.directory_clear.confirm(token)
+    return {'ok': True}
 
 
 @app.post('/api/cleanup/settings')

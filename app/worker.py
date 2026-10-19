@@ -4,11 +4,13 @@ import json
 import httpx
 from .cloud import CloudError, TaskFailed
 from .cleanup import legacy_manifest, file_spec, transferred_targets, targets_manifest
+from .directory_clear import DirectoryClear
 
 
 class Worker:
     def __init__(self, store, cloud):
         self.store, self.cloud = store, cloud
+        self.directory_clear = DirectoryClear(store, cloud)
 
     async def process(self, job):
         jid = job['id']
@@ -92,8 +94,8 @@ class Worker:
             return
         if (not self.store.get('auto_cleanup', False) or job['status'] != 'success'
             or job['cleanup_state'] != 'pending' or not job['cleanup_enabled']
-            or (time.time() - job['completed_at'] < 3600 if job['completed_at'] is not None
-                else time.time() - job['created'] <= 7200)):
+            or time.time() - (job['completed_at'] if job['completed_at'] is not None else job['created'])
+                < self.store.get('cleanup_minutes', 60) * 60):
             return
         try:
             if job['cleanup_targets']:
@@ -108,7 +110,9 @@ class Worker:
             self.store.update_job(jid, cleanup_state='blocked', cleanup_error='目录位置或内容变化，或核对失败；请手动检查，不会自动删除')
             return
         # A user can turn cleanup off while the read-only check is awaiting the network.
-        if not self.store.get('auto_cleanup', False):
+        if (not self.store.get('auto_cleanup', False)
+            or time.time() - (job['completed_at'] if job['completed_at'] is not None else job['created'])
+                < self.store.get('cleanup_minutes', 60) * 60):
             return
         self.store.update_job(jid, cleanup_state='deleting', cleanup_error='')
         try:
@@ -126,8 +130,9 @@ class Worker:
         jobs = self.store.rows("""SELECT * FROM jobs WHERE status='success' AND cleanup_enabled=1
             AND cleanup_next<=? AND (cleanup_state='submitted' OR
             (cleanup_state='pending' AND ((completed_at IS NOT NULL AND completed_at<=?)
-            OR (completed_at IS NULL AND created<?)) AND ?=1)) ORDER BY COALESCE(completed_at,created),id LIMIT 1""",
-            (time.time(), time.time() - 3600, time.time() - 7200, bool(self.store.get('auto_cleanup', False))))
+            OR (completed_at IS NULL AND created<=?)) AND ?=1)) ORDER BY COALESCE(completed_at,created),id LIMIT 1""",
+            (time.time(), time.time() - self.store.get('cleanup_minutes', 60)*60,
+             time.time() - self.store.get('cleanup_minutes', 60)*60, bool(self.store.get('auto_cleanup', False))))
         if jobs:
             await self.cleanup(jobs[0])
 
@@ -135,13 +140,15 @@ class Worker:
         next_cleanup_check = 0.0
         while True:
             if self.store.get('cloud_token'):
-                jobs = self.store.rows("SELECT * FROM jobs WHERE status IN ('queued','submitted') AND next_at<=? ORDER BY next_at,id LIMIT 1", (time.time(),))
-                if jobs:
-                    try:
-                        await self.process(jobs[0])
-                    except Exception:
-                        self.store.update_job(jobs[0]['id'], status='uncertain', error='处理异常，请检查任务与云盘状态')
-                if time.monotonic() >= next_cleanup_check:
-                    await self.cleanup_due()
-                    next_cleanup_check = time.monotonic() + 30
+                async with self.cloud.operation_lock:
+                    if not await self.directory_clear.step():
+                        jobs = self.store.rows("SELECT * FROM jobs WHERE status IN ('queued','submitted') AND next_at<=? ORDER BY next_at,id LIMIT 1", (time.time(),))
+                        if jobs:
+                            try:
+                                await self.process(jobs[0])
+                            except Exception:
+                                self.store.update_job(jobs[0]['id'], status='uncertain', error='处理异常，请检查任务与云盘状态')
+                        if time.monotonic() >= next_cleanup_check:
+                            await self.cleanup_due()
+                            next_cleanup_check = time.monotonic() + 30
             await asyncio.sleep(1)

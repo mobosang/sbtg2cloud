@@ -12,6 +12,13 @@ class Store:
         self.db.executescript('''
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS directory_clears (
+          id TEXT PRIMARY KEY,parent_id TEXT NOT NULL,parent_name TEXT NOT NULL,
+          items TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,error TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS directory_clear_parts (
+          clear_id TEXT NOT NULL,part INTEGER NOT NULL,ids TEXT NOT NULL,state TEXT NOT NULL,
+          task TEXT NOT NULL DEFAULT '',next_at REAL NOT NULL DEFAULT 0,PRIMARY KEY(clear_id,part));
+        CREATE TABLE IF NOT EXISTS directory_clear_claims (file_id TEXT PRIMARY KEY,clear_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sources (
           id INTEGER PRIMARY KEY, title TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
           target_id TEXT, target_name TEXT, enabled_at REAL NOT NULL DEFAULT 0);
@@ -46,6 +53,8 @@ class Store:
         # A request in flight may already have changed the cloud: never blindly resubmit.
         self.db.execute("UPDATE jobs SET status='uncertain', error='上次提交期间服务中断，请先核对云盘，再决定是否重试' WHERE status='submitting'")
         self.db.execute("UPDATE jobs SET status='queued' WHERE status='preparing'")
+        self.db.execute("UPDATE directory_clears SET state='uncertain',error='删除提交中断，请核对回收站；不会重发' WHERE id IN (SELECT clear_id FROM directory_clear_parts WHERE state='deleting')")
+        self.db.execute("UPDATE directory_clear_parts SET state='uncertain' WHERE state='deleting'")
         self.db.commit()
 
     def get(self, key, default=None):

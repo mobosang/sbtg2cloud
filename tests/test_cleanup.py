@@ -125,6 +125,15 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         await self.worker.cleanup_due()
         self.cloud.delete_cleanup_folder.assert_not_awaited()
 
+    async def test_increased_delay_during_preflight_stops_delete(self):
+        self.due()
+        async def checking(*args):
+            self.store.set('cleanup_minutes',600)
+            return 'snapshot'
+        self.cloud.cleanup_manifest.side_effect=checking
+        await self.worker.cleanup_due()
+        self.cloud.delete_cleanup_folder.assert_not_awaited()
+
     async def test_changed_or_unreadable_tree_blocks_delete(self):
         self.due()
         for result in ('new content', CloudError('missing')):
@@ -212,11 +221,11 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.store.update_job(1, status='success')
         self.cloud.pages = AsyncMock(return_value=[{'fileId':'legacy-file','fileName':'Example (2026)','resType':1,'fileSize':10}])
         self.store.execute('UPDATE jobs SET created=10000 WHERE id=1')
-        with patch('app.cleanup.time.time', return_value=17200):
+        with patch('app.cleanup.time.time', return_value=13599):
             with self.assertRaises(ValueError):
                 await queue_history(self.store,self.cloud,1,'legacy-file','Example (2026)')
         self.cloud.pages.assert_not_awaited()
-        with patch('app.cleanup.time.time', return_value=17201):
+        with patch('app.cleanup.time.time', return_value=13600):
             await queue_history(self.store,self.cloud,1,'legacy-file','Example (2026)')
         self.assertIsNone(self.job()['completed_at'])
         self.store.set('auto_cleanup',True)
