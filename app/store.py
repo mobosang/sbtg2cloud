@@ -25,6 +25,18 @@ class Store:
         ''')
         if 'resource_name' not in {row[1] for row in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN resource_name TEXT NOT NULL DEFAULT ''")
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(jobs)')}
+        for name, definition in {
+            'completed_at': 'REAL', 'cleanup_enabled': 'INTEGER NOT NULL DEFAULT 0',
+            'cleanup_folder': "TEXT NOT NULL DEFAULT ''", 'cleanup_name': "TEXT NOT NULL DEFAULT ''",
+            'cleanup_manifest': "TEXT NOT NULL DEFAULT ''", 'cleanup_state': "TEXT NOT NULL DEFAULT ''",
+            'cleanup_task': "TEXT NOT NULL DEFAULT ''", 'cleanup_error': "TEXT NOT NULL DEFAULT ''",
+            'cleanup_next': 'REAL NOT NULL DEFAULT 0',
+        }.items():
+            if name not in columns:
+                self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
+        self.db.execute("UPDATE jobs SET cleanup_state='uncertain', cleanup_error='删除提交期间服务中断，请手动核对；不会再次删除' WHERE cleanup_state='deleting'")
+        self.db.execute("UPDATE jobs SET cleanup_state='blocked', cleanup_error='未记录完整目录快照，不会自动删除' WHERE status='success' AND cleanup_enabled=1 AND cleanup_state=''")
         # A request in flight may already have changed the cloud: never blindly resubmit.
         self.db.execute("UPDATE jobs SET status='uncertain', error='上次提交期间服务中断，请先核对云盘，再决定是否重试' WHERE status='submitting'")
         self.db.execute("UPDATE jobs SET status='queued' WHERE status='preparing'")
@@ -47,7 +59,9 @@ class Store:
         return result
 
     def update_job(self, job_id, **fields):
-        allowed = {'status', 'attempts', 'next_at', 'remote_task', 'error', 'code', 'resource_name'}
+        allowed = {'status', 'attempts', 'next_at', 'remote_task', 'error', 'code', 'resource_name',
+                   'completed_at', 'cleanup_enabled', 'cleanup_folder', 'cleanup_name', 'cleanup_manifest',
+                   'cleanup_state', 'cleanup_task', 'cleanup_error', 'cleanup_next'}
         if not fields.keys() <= allowed:
             raise ValueError('Invalid job fields')
         fields['updated'] = time.time()
@@ -59,9 +73,10 @@ class Store:
         target_name = source['target_name'] if source['target_id'] is not None else default['name']
         now = time.time()
         self.execute('''INSERT OR IGNORE INTO jobs
-          (share_id,url,code,source_id,message_id,target_id,target_name,created,updated,resource_name)
-          VALUES (?,?,?,?,?,?,?,?,?,?)''',
-          (link['share_id'], link['url'], link['code'], source['id'], message_id, target_id, target_name, now, now, resource_name))
+          (share_id,url,code,source_id,message_id,target_id,target_name,created,updated,resource_name,cleanup_enabled)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+          (link['share_id'], link['url'], link['code'], source['id'], message_id, target_id, target_name, now, now, resource_name,
+           bool(self.get('auto_cleanup', False))))
 
     def save_sources(self, sources):
         ids = [source['id'] for source in sources]

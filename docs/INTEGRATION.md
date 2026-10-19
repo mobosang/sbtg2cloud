@@ -29,6 +29,18 @@
 
 真实账号尚待验证：扫码授权成功、授权续期、分享提取码、文件夹全量转存、失效链接/空间不足、服务端同名冲突。后台状态未知或回执缺失时不判成功。
 
+## 删除接口（2026-10-19）
+
+[官方 OpenAPI v1.3 文档](https://ossdata.guangyapan.com/doc/guangyapan_openapi_cn.md) 未列出网盘文件删除 API；`delete_upload_task` 是取消上传任务，不能代替文件删除。文档中的 `get_info_by_task_id` 用于上传结果，不能假设返回分享转存后的目标 ID。
+
+官方网页 JS 的删除调用及 [ChenyangGao/guangyapan 的 fs_delete](https://github.com/ChenyangGao/guangyapan/blob/main/guangyapan/client.py) 对应 `POST /userres/v1/file/delete_file`，请求 `{"fileIds":["自己网盘的文件或目录ID"]}`，返回 `data.taskId`。普通目录移入回收站；对已在回收站内的对象再次调用可能永久删除。因此实现不自动重试删除请求（包括 401），只轮询已知任务 ID，未知回执人工核对。
+
+采用 `POST /userres/v1/file/create_dir`，参数 `dirName,parentId,failIfNameExist=true`，获取 `data.fileId` 创建每任务独立目录。成功后保存目录内容快照，到期再检查。源分享 ID 不作删除目标，历史记录不自动绑定同名目录。删除接口来源为网页协议与第三方实现，并非公开 OpenAPI 的稳定性承诺；当前仅完成模拟测试，没有实际删除账号数据。
+
+新增 `completed_at` 与清理字段通过 SQLite 增量迁移；原记录成功时间保留为空，不伪造。清理状态与转存状态分离，删除失败不修改成功去重记录。`deleting` 启动恢复为 `uncertain`，不会重发；成功后未能记录快照的任务停止清理。
+
+所有光鸭请求共享串行锁与 2 秒间隔；429/5xx 延迟至少 60 秒。清理的年龄筛选每 30 秒仅查本地数据库；目录核对仅在转存完成时和到期后发生。不对“不会封号”作保证。
+
 ## 安全与运行模型
 
 所有云盘 HTTP 请求固定发往 account/api.guangyapan.com，不请求消息提供的任意地址；严格校验分享主机和路径，避免服务端任意 URL 访问。管理 API 要求同源及自定义请求头，拒绝跨站请求；页面使用 textContent 展示频道和服务数据，CSP 限制脚本来源。此机制不代替身份认证，局域网其他可访问端口的设备可管理该服务。

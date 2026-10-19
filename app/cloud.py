@@ -1,5 +1,6 @@
 """Guangya protocol adapter. See docs/INTEGRATION.md for evidence and limits."""
 import asyncio
+import json
 import time
 import httpx
 from .proxy import validate_http_environment, ProxyConfigError
@@ -45,9 +46,24 @@ class Cloud:
             # Keep WebUI available, but never silently send direct requests.
             self.http = httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False)
         self.lock = asyncio.Lock()
+        self.request_lock = asyncio.Lock()
+        self.next_request_at = 0.0
+        self.history_lock = asyncio.Lock()
+        self.history_cache = {}
         self.login_error = self.proxy_error
 
     async def raw(self, url, payload, token=''):
+        # All Guangya traffic in this process shares the same pacing, including UI reads.
+        async with self.request_lock:
+            delay = self.next_request_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                return await self._raw(url, payload, token)
+            finally:
+                self.next_request_at = max(self.next_request_at, time.monotonic() + 2)
+
+    async def _raw(self, url, payload, token=''):
         if self.proxy_error:
             raise CloudError(self.proxy_error)
         headers = {'Authorization': f'Bearer {token}'} if token else {}
@@ -55,6 +71,9 @@ class Cloud:
         if response.status_code == 401:
             raise CloudError('光鸭登录已过期，请重新扫码', login=True)
         if response.status_code == 429 or response.status_code >= 500:
+            retry_after = response.headers.get('Retry-After', '')
+            cooldown = max(60, min(int(retry_after), 900)) if retry_after.isdigit() else 60
+            self.next_request_at = max(self.next_request_at, time.monotonic() + cooldown)
             raise CloudError('光鸭服务繁忙，请稍后重试', retryable=True)
         if response.status_code >= 400:
             # OAuth uses HTTP 400 for authorization_pending; retain only parsed body internally.
@@ -148,6 +167,18 @@ class Cloud:
         return [{'id': str(x.get('id', x.get('fileId'))), 'name': x.get('name', x.get('fileName', '未命名'))}
                 for x in rows if x.get('resType') == 2 or x.get('isDir') in (True, 1) or x.get('kind') == 'drive#folder']
 
+    async def history_files(self, parent):
+        # Only previews may use stale listings. Deletion preflight always reads fresh data.
+        async with self.history_lock:
+            cached = self.history_cache.get(parent)
+            if cached and time.monotonic() - cached[0] < 300:
+                return cached[1]
+            rows = await self.pages('/file/get_file_list', {'parentId': parent})
+            if len(self.history_cache) >= 8:
+                self.history_cache.pop(next(iter(self.history_cache)))
+            self.history_cache[parent] = (time.monotonic(), rows)
+            return rows
+
     async def prepare(self, share_id, code):
         access = await self.call('/get_share_access_token', {'shareId': share_id, 'code': code})
         if not isinstance(access, dict) or not access.get('accessToken'):
@@ -167,6 +198,50 @@ class Cloud:
         data = await self.call('/restore_share', {'accessToken': access, 'fileIds': ids, 'parentId': parent})
         if not isinstance(data, dict) or not data.get('taskId'):
             raise CloudError('转存响应缺少任务 ID，请核对云盘后再重试')
+        return str(data['taskId'])
+
+    async def create_cleanup_folder(self, parent, name):
+        data = await self.call('/file/create_dir', {
+            'parentId': parent, 'dirName': name, 'failIfNameExist': True})
+        if not isinstance(data, dict) or not data.get('fileId'):
+            raise CloudError('临时目录创建结果不明，请核对云盘')
+        folder = str(data['fileId'])
+        if folder == parent:
+            raise CloudError('临时目录 ID 异常')
+        return folder
+
+    async def cleanup_manifest(self, parent, folder, name):
+        """Read only the normal directory tree; never enumerate the recycle bin."""
+        roots = await self.folders(parent)
+        if not folder or folder == parent or not any(x['id'] == folder and x['name'] == name for x in roots):
+            raise CloudError('临时目录已移动、改名或不存在，停止自动删除')
+        pending, seen, manifest = [folder], {folder}, []
+        while pending:
+            current = pending.pop()
+            rows = await self.pages('/file/get_file_list', {'parentId': current})
+            for row in rows:
+                fid = str(row.get('fileId') or row.get('id') or '')
+                kind = row.get('resType')
+                if not fid or fid in seen or kind not in (1, 2) or len(seen) >= 10000:
+                    raise CloudError('临时目录内容无法完整核对，停止自动删除')
+                seen.add(fid)
+                # Only stable identity/content fields, never access tokens or signed URLs.
+                manifest.append([current, fid, kind, row.get('fileName', row.get('name')),
+                                 row.get('fileSize', row.get('size')), row.get('md5'),
+                                 row.get('updateTime'), row.get('modifyTime')])
+                if kind == 2:
+                    pending.append(fid)
+        return json.dumps(sorted(manifest, key=lambda x: x[1]), ensure_ascii=False)
+
+    async def delete_cleanup_folder(self, folder):
+        if not folder:
+            raise CloudError('缺少待删除目录 ID')
+        # Deliberately do not use call(): no automatic retry of this destructive request,
+        # including after HTTP 401. A second delete can permanently erase recycled files.
+        token = await self.token()
+        data = check(await self.raw(API + '/file/delete_file', {'fileIds': [folder]}, token)).get('data')
+        if not isinstance(data, dict) or not data.get('taskId'):
+            raise CloudError('删除提交结果不明，请手动核对')
         return str(data['taskId'])
 
     async def task(self, task_id):

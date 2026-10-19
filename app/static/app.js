@@ -2,6 +2,8 @@ const $ = id => document.getElementById(id);
 let editingSources = false, visibleJobs = [], sourceList = [], folderStack = [], folderCallback, jobsFilter = 'all', jobsPage = 1, jobsPages = 1, jobsPageSize = 20, jobsMaxId = null, jobsRequest = 0, toastTimer;
 const states = {proxy_config_error:'代理配置错误',not_configured:'未配置',connecting:'连接中',connected:'已连接',disconnected:'连接中断',login_required:'待登录',scan_qr:'等待扫码',password_required:'需要两步验证',qr_expired:'二维码已过期',authorized:'已授权',expired:'二维码已过期',failed:'失败',idle:'未登录'};
 const jobStates = {queued:'排队中',preparing:'读取分享',submitting:'正在提交',submitted:'云端处理中',success:'已完成',failed:'失败',uncertain:'结果待核对'};
+const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',submitted:'云端删除中',done:'已移入回收站',blocked:'清理已停止，需核对',uncertain:'删除结果待核对'};
+let cleanupEnabled=false, historyPage=1;
 function text(tag, value, cls) { const e=document.createElement(tag); e.textContent=value; if(cls)e.className=cls; return e; }
 function toast(message) { $('notice').textContent=message; $('notice').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('notice').hidden=true,7000); }
 async function api(path, body) {
@@ -26,6 +28,9 @@ async function refreshState(){
   $('cloud-error').textContent=s.cloud.error||'';
   image('cloud-image',s.cloud.qr);
   $('target').textContent=s.target.name;
+  cleanupEnabled=s.auto_cleanup;
+  $('cleanup-state').textContent=cleanupEnabled?'已启用':'关闭 / 暂停';
+  $('toggle-cleanup').textContent=cleanupEnabled?'暂停自动清理':'启用自动清理';
   $('queued').textContent=s.counts.queued||0;
   $('active').textContent=(s.counts.preparing||0)+(s.counts.submitting||0)+(s.counts.submitted||0);
   $('success').textContent=s.counts.success||0;
@@ -36,6 +41,25 @@ $('password-form').addEventListener('submit',async e=>{e.preventDefault();const 
 action('tg-qr',async()=>{await api('/telegram/qr',{});await refreshState();});
 action('tg-logout',async()=>{if(confirm('退出此项目使用的 Telegram 会话，并停用所有监听来源？')){await api('/telegram/logout',{});await refreshState();await refreshSources();}});
 action('cloud-qr',async()=>{await api('/cloud/qr',{});await refreshState();});
+action('toggle-cleanup',async()=>{
+  const enabled=!cleanupEnabled;
+  if(enabled&&!confirm('启用后，新任务将保存到独立临时子目录，并在转存成功满 1 小时后移入回收站。已有到期的待清理任务也会恢复执行。确认启用？'))return;
+  await api('/cleanup/settings',{enabled});await refreshState();toast(enabled?'自动清理已启用':'自动清理已暂停；已提交的删除仍会完成');
+});
+async function previewHistory(page){
+  const data=await api('/cleanup/history?page='+page);historyPage=data.page;
+  $('history-summary').textContent='历史记录第 '+data.page+' / '+data.pages+' 页，共 '+data.total+' 条。目录列表缓存 5 分钟；候选目标仅供核对，尚未执行删除。';
+  $('history-items').replaceChildren();
+  for(const job of data.items){
+    const item=text('div','','destination');item.append(text('strong','#'+job.id+' '+(job.resource_name||job.share_id)),text('small','原保存目录：'+job.target_name),text('small',job.note));
+    for(const candidate of job.candidates)item.append(text('p',(candidate.folder?'文件夹：':'文件：')+candidate.name+' · ID：'+candidate.id));
+    $('history-items').append(item);
+  }
+  $('history-prev').hidden=data.page<=1;$('history-next').hidden=data.page>=data.pages;
+}
+action('history-preview',()=>previewHistory(1));
+action('history-prev',()=>previewHistory(historyPage-1));
+action('history-next',()=>previewHistory(historyPage+1));
 async function refreshSources(){sourceList=await api('/sources');renderSources();}
 function renderSources(){
   $('save-sources').hidden=!editingSources;
@@ -92,7 +116,7 @@ async function refreshJobs(){
   $('next-jobs').disabled=jobsPage>=jobsPages;
   $('page-number').value=jobsPage;$('page-number').max=jobsPages;
   $('page-summary').textContent='第 '+jobsPage+' / '+jobsPages+' 页 · 共 '+result.total+' 条';
-  const jobs=result.items;visibleJobs=jobs;$('jobs').replaceChildren();for(const job of jobs){const row=document.createElement('tr'),share=document.createElement('td'),link=text('a',job.resource_name||'资源名称待补全');link.href=job.url;link.target='_blank';link.rel='noreferrer';share.append(link,text('small',job.share_id),text('small',(job.source_title||'未知来源')+' · '+new Date(job.created*1000).toLocaleString()));const status=text('td',jobStates[job.status]||job.status);if(job.error)status.append(text('small',job.error,'job-error'));const operations=document.createElement('td');if(['failed','uncertain'].includes(job.status)){const b=text('button','重试 / 补码','secondary');b.onclick=async()=>{if(job.status==='uncertain'&&!confirm('请先检查云盘。确认这次分享尚未转存，仍要重新提交吗？'))return;const code=prompt('补填提取码（留空保留原值）：','');if(code===null)return;b.disabled=true;try{await api('/jobs/'+job.id+'/retry',{code,confirm_uncertain:job.status==='uncertain'});await refreshJobs();}catch(e){toast(e.message);}finally{b.disabled=false;}};operations.append(b);}row.append(share,text('td',job.target_name),status,operations);$('jobs').append(row);}if(!jobs.length){const r=document.createElement('tr'),c=text('td',jobsFilter==='all'?'暂无记录。启用监听后，新发现的分享会出现在这里。':jobsFilter==='queued'?'暂无待处理记录。':'暂无需要处理的记录。','empty');c.colSpan=4;r.append(c);$('jobs').append(r);}}
+  const jobs=result.items;visibleJobs=jobs;$('jobs').replaceChildren();for(const job of jobs){const row=document.createElement('tr'),share=document.createElement('td'),link=text('a',job.resource_name||'资源名称待补全');link.href=job.url;link.target='_blank';link.rel='noreferrer';share.append(link,text('small',job.share_id),text('small',(job.source_title||'未知来源')+' · '+new Date(job.created*1000).toLocaleString()));const status=text('td',jobStates[job.status]||job.status);if(job.error)status.append(text('small',job.error,'job-error'));if(job.completed_at)status.append(text('small','转存成功：'+new Date(job.completed_at*1000).toLocaleString()));if(job.cleanup_state)status.append(text('small',cleanupStates[job.cleanup_state]||job.cleanup_state));if(job.cleanup_state==='pending'&&job.completed_at)status.append(text('small','到期：'+new Date((job.completed_at+3600)*1000).toLocaleString()+(cleanupEnabled?'':'（已暂停）')));if(job.cleanup_error)status.append(text('small',job.cleanup_error,'job-error'));const operations=document.createElement('td');if(['failed','uncertain'].includes(job.status)){const b=text('button','重试 / 补码','secondary');b.onclick=async()=>{if(job.status==='uncertain'&&!confirm('请先检查云盘。确认这次分享尚未转存，仍要重新提交吗？'))return;const code=prompt('补填提取码（留空保留原值）：','');if(code===null)return;b.disabled=true;try{await api('/jobs/'+job.id+'/retry',{code,confirm_uncertain:job.status==='uncertain'});await refreshJobs();}catch(e){toast(e.message);}finally{b.disabled=false;}};operations.append(b);}row.append(share,text('td',job.target_name+(job.cleanup_folder?'/'+job.cleanup_name:'')),status,operations);$('jobs').append(row);}if(!jobs.length){const r=document.createElement('tr'),c=text('td',jobsFilter==='all'?'暂无记录。启用监听后，新发现的分享会出现在这里。':jobsFilter==='queued'?'暂无待处理记录。':'暂无需要处理的记录。','empty');c.colSpan=4;r.append(c);$('jobs').append(r);}}
 async function filterJobs(value,scroll=false){
   jobsFilter=value;jobsPage=1;jobsMaxId=null;$('job-filter').value=value;
   if(scroll){$('jobs-heading').focus({preventScroll:true});$('jobs-section').scrollIntoView({behavior:'smooth',block:'start'});}

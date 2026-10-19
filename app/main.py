@@ -18,6 +18,7 @@ from .cloud import Cloud, CloudError
 from .store import Store
 from .telegram import Telegram
 from .worker import Worker
+from .cleanup import history_preview
 
 DATA = Path(os.environ.get('DATA_DIR', './data'))
 STATIC = Path(__file__).parent / 'static'
@@ -107,6 +108,7 @@ async def state():
                      'qr': qr_image(tg.qr_url)},
         'cloud': {'configured': bool(store.get('cloud_token')), 'error': cloud.login_error, **app.state.cloud_qr},
         'target': store.get('target', {'id': '', 'name': '/'}),
+        'auto_cleanup': bool(store.get('auto_cleanup', False)),
         'counts': {r['status']: r['n'] for r in store.rows('SELECT status,COUNT(*) n FROM jobs GROUP BY status')},
     }
 
@@ -114,6 +116,21 @@ async def state():
 class Credentials(BaseModel):
     api_id: int = Field(gt=0)
     api_hash: str = Field(pattern=r'^[a-fA-F0-9]{32}$')
+
+
+class CleanupSettings(BaseModel):
+    enabled: bool
+
+
+@app.post('/api/cleanup/settings')
+async def cleanup_settings(value: CleanupSettings):
+    app.state.store.set('auto_cleanup', value.enabled)
+    return {'ok': True}
+
+
+@app.get('/api/cleanup/history')
+async def cleanup_history(page: int = Query(1, ge=1)):
+    return await history_preview(app.state.store, app.state.cloud, page)
 
 
 @app.post('/api/telegram/config')
@@ -266,8 +283,11 @@ async def source(source_id: int, value: SourceUpdate):
 
 @app.get('/api/jobs')
 async def jobs(before: int = 0):
-    return app.state.store.rows('''SELECT j.*,s.title source_title FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
+    items = app.state.store.rows('''SELECT j.*,s.title source_title FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
       WHERE (?=0 OR j.id<?) ORDER BY j.id DESC LIMIT 100''', (before, before))
+    for item in items:
+        item.pop('cleanup_manifest', None)
+    return items
 
 
 @app.get('/api/job-pages')
@@ -288,6 +308,8 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
     page = min(page, pages)
     items = store.rows('''SELECT j.*,s.title source_title FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
       WHERE j.id<=?''' + condition + ' ORDER BY j.id DESC LIMIT ? OFFSET ?', (max_id, *statuses, page_size, (page - 1) * page_size))
+    for item in items:
+        item.pop('cleanup_manifest', None)
     return {'items': items, 'page': page, 'page_size': page_size, 'pages': pages, 'total': total, 'max_id': max_id,
             'status_filter': status_filter}
 
