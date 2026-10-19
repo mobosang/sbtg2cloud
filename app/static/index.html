@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TG → 光鸭 · 自动转存</title><link rel="stylesheet" href="/static/style.css"><script defer src="/static/app.js"></script></head>
+<body>
+<header><div><span class="eyebrow">LOCAL · UNRAID</span><h1>TG <span>→</span> 光鸭</h1><p>把关注的分享，收进自己的云盘。</p></div><span class="badge">仅监听新消息</span></header>
+<main>
+<div id="notice" role="status" hidden></div>
+<section class="stats" aria-label="任务统计"><div><strong id="queued">0</strong><span>待处理</span></div><div><strong id="active">0</strong><span>转存中</span></div><div><strong id="success">0</strong><span>已完成</span></div><div><strong id="failed">0</strong><span>需要处理</span></div></section>
+<div class="connections">
+<section class="card"><div class="section-head"><h2>01 · Telegram</h2><span id="tg-state" class="status">未配置</span></div>
+<p class="hint">在手机 Telegram 中打开「设置 → 设备 → 扫描二维码」。应用凭据仅需填写一次。</p>
+<details id="credentials"><summary>设置应用凭据</summary><p class="hint">从 <a href="https://my.telegram.org/apps" target="_blank" rel="noreferrer">my.telegram.org/apps</a> 获取自己的 API ID 和 API Hash。</p><form id="tg-form"><label>API ID<input name="api_id" type="number" min="1" required autocomplete="off"></label><label>API Hash<input name="api_hash" type="password" pattern="[a-fA-F0-9]{32}" required autocomplete="off"></label><button>保存凭据</button></form></details>
+<div class="actions"><button id="tg-qr">生成登录二维码</button><button id="tg-logout" class="secondary">退出账号</button></div><img id="tg-image" class="qr" alt="Telegram 登录二维码" hidden>
+<form id="password-form" hidden><label>Telegram 两步验证密码<input type="password" name="password" required autocomplete="off"></label><button>完成登录</button><small>密码仅用于本次验证，不保存。</small></form><p id="tg-error" class="error"></p></section>
+<section class="card"><div class="section-head"><h2>02 · 光鸭云盘</h2><span id="cloud-state" class="status">未登录</span></div><p class="hint">使用光鸭云盘 App 扫码授权。登录信息保存在本地数据目录，过期时尝试自动续期。</p><button id="cloud-qr">生成登录二维码</button><img id="cloud-image" class="qr" alt="光鸭云盘登录二维码" hidden><p id="cloud-error" class="error"></p><div class="destination"><span class="hint">默认保存位置</span><strong id="target">/</strong><button id="choose-default" class="secondary">选择云盘目录</button></div></section>
+</div>
+<section class="card"><div class="section-head"><div><h2>03 · 监听来源</h2><p class="hint" id="sources-hint">仅显示已保存的监听频道；点击“编辑监听”可增减频道。</p></div><div class="actions"><button id="edit-sources" class="secondary">编辑监听</button><button id="refresh-sources" class="secondary" hidden>获取聊天列表</button><button id="cancel-sources" class="secondary" hidden>取消</button><button id="save-sources" hidden>保存监听</button></div></div><div id="sources" class="source-list"><p class="empty">登录 Telegram 后获取聊天列表，勾选需要监听的频道或群。</p></div></section>
+<section class="card"><div class="section-head"><div><h2>转存记录</h2><p class="hint">已成功转存的分享全局去重。提交结果不明时，请先核对云盘。</p></div><div class="actions"><button id="fill-titles" class="secondary">补全本页名称</button><button id="refresh-jobs" class="secondary">最新记录</button></div></div><div class="table-wrap"><table><thead><tr><th>资源名称 / 来源</th><th>保存位置</th><th>状态</th><th>操作</th></tr></thead><tbody id="jobs"></tbody></table></div><nav class="pagination" aria-label="转存记录分页"><label>每页 <select id="page-size" aria-label="每页显示数量"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label><span id="page-summary" aria-live="polite">第 1 / 1 页 · 共 0 条</span><button id="previous-jobs" class="secondary" disabled>上一页</button><button id="next-jobs" class="secondary" disabled>下一页</button><form id="jump-page"><label for="page-number">跳至</label><input id="page-number" type="number" min="1" max="1" value="1" required aria-label="页码"><button class="secondary">跳转</button></form></nav></section>
+<footer>文件在光鸭云端转存，不下载到 Unraid。本管理页未设置访问密码，仅向可信局域网开放。</footer>
+</main>
+<dialog id="folder-dialog"><div class="section-head"><h2>选择保存目录</h2><button id="close-folders" class="secondary">关闭</button></div><p id="folder-path">/</p><div class="actions"><button id="folder-up" class="secondary">上一级</button><button id="folder-select">保存到当前目录</button></div><div id="folder-list"></div></dialog>
+</body></html>

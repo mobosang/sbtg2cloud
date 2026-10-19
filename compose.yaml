@@ -1,0 +1,19 @@
+services:
+  sbtg2cloud:
+    build: .
+    image: sbtg2cloud:local
+    platform: linux/amd64
+    container_name: sbtg2cloud
+    restart: unless-stopped
+    user: "${PUID:-99}:${PGID:-100}"
+    ports:
+      - "${BIND_IP:-0.0.0.0}:8080:8080"
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+    volumes:
+      - ${APPDATA_PATH:-./data}:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

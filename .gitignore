@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+.research/
+.env
+dist/
+# Runtime databases, account sessions, backups and local credentials
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.session
+*.session-*
+*.log
+backups/
+.env.*
+!.env.example
+*.pem
+*.key
