@@ -224,6 +224,41 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(client.get('/api/job-pages',headers=headers).json()['total'],125)
                 self.assertEqual(client.get('/api/job-pages?status_filter=invalid',headers=headers).status_code,422)
 
+    def test_discard_preserves_dedup_receipts_and_excludes_attention(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):
+            with TestClient(main.app) as client:
+                headers = {'X-Sbtg-Client': 'web'}
+                store = main.app.state.store
+                def seed():
+                    for i, status in enumerate(('failed','uncertain','queued','submitted','success','preparing','submitting'), 1):
+                        store.enqueue({'share_id':str(i),'url':'https://example.com','code':''},
+                                      {'id':1,'target_id':None,'target_name':None},i)
+                        store.update_job(i,status=status,remote_task='receipt',error='original error')
+                client.portal.call(seed)
+                main.app.state.cloud.prepare = AsyncMock()
+                main.app.state.cloud.delete_cleanup_targets = AsyncMock()
+                for jid in (1,2):
+                    for _ in range(2):
+                        self.assertEqual(client.post(f'/api/jobs/{jid}/discard',headers=headers,json={}).status_code,200)
+                    self.assertEqual(client.post(f'/api/jobs/{jid}/retry',headers=headers,json={}).status_code,409)
+                    self.assertEqual(client.post(f'/api/jobs/{jid}/title',headers=headers,json={}).status_code,409)
+                self.assertEqual(client.get('/api/job-pages?status_filter=attention',headers=headers).json()['total'],0)
+                discarded=client.get('/api/job-pages?status_filter=discarded',headers=headers).json()
+                self.assertEqual(discarded['total'],2)
+                self.assertTrue(all(j['remote_task']=='receipt' and j['error']=='original error' for j in discarded['items']))
+                self.assertEqual(client.get('/api/state',headers=headers).json()['counts'].get('failed',0),0)
+                for jid in range(3,8):
+                    self.assertEqual(client.post(f'/api/jobs/{jid}/discard',headers=headers,json={}).status_code,409)
+                self.assertEqual(client.post('/api/jobs/999/discard',headers=headers,json={}).status_code,404)
+                client.portal.call(store.enqueue,{'share_id':'1','url':'https://example.com','code':''},
+                                   {'id':1,'target_id':None,'target_name':None},999)
+                self.assertEqual(client.get('/api/job-pages',headers=headers).json()['total'],7)
+                client.portal.call(lambda: store.update_job(3,status='failed',cleanup_state='submitted'))
+                self.assertEqual(client.post('/api/jobs/3/discard',headers=headers,json={}).status_code,409)
+                main.app.state.cloud.prepare.assert_not_awaited()
+                main.app.state.cloud.delete_cleanup_targets.assert_not_awaited()
+
     def test_job_pagination_sizes_boundaries_and_snapshot(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):

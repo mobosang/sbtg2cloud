@@ -342,7 +342,7 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
     if page_size not in (10, 20, 50, 100):
         raise HTTPException(422, '每页数量只支持 10、20、50、100')
     store = app.state.store
-    filters = {'all': (), 'queued': ('queued',), 'attention': ('failed', 'uncertain')}
+    filters = {'all': (), 'queued': ('queued',), 'attention': ('failed', 'uncertain'), 'discarded': ('discarded',)}
     if status_filter not in filters:
         raise HTTPException(422, '不支持的记录筛选条件')
     statuses = filters[status_filter]
@@ -368,6 +368,8 @@ async def fill_title(job_id: int):
     if not rows:
         raise HTTPException(404, '记录不存在')
     job = rows[0]
+    if job['status'] == 'discarded':
+        raise HTTPException(409, '已丢弃的任务不再读取分享')
     if not job['resource_name']:
         _, _, title = await app.state.cloud.prepare(job['share_id'], job['code'])
         if not title:
@@ -379,6 +381,24 @@ async def fill_title(job_id: int):
 class Retry(BaseModel):
     code: str = Field(default='', max_length=32)
     confirm_uncertain: bool = False
+
+
+@app.post('/api/jobs/{job_id}/discard')
+async def discard(job_id: int):
+    store = app.state.store
+    rows = store.rows('SELECT * FROM jobs WHERE id=?', (job_id,))
+    if not rows:
+        raise HTTPException(404, '记录不存在')
+    job = rows[0]
+    if job['status'] == 'discarded':
+        return {'ok': True}
+    if job['status'] not in ('failed', 'uncertain'):
+        raise HTTPException(409, '只可丢弃失败或结果待核对的任务')
+    if job['cleanup_state'] in ('pending', 'deleting', 'submitted', 'uncertain'):
+        raise HTTPException(409, '该任务有关联的清理操作，请先核对清理状态')
+    # Preserve share_id and all receipts: discarded links stay globally deduplicated.
+    store.update_job(job_id, status='discarded')
+    return {'ok': True}
 
 
 @app.post('/api/jobs/{job_id}/retry')
