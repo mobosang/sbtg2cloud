@@ -76,8 +76,8 @@ def mapped_path(path, settings):
 
 def safe_headers(headers, extra=()):
     excluded = HOP_HEADERS | {x.strip().lower() for x in headers.get('connection', '').split(',')} | set(extra)
-    items = headers.multi_items() if isinstance(headers, httpx.Headers) else headers.items()
-    return [(k, v) for k, v in items if k.lower() not in excluded]
+    # Preserve wire bytes: native clients may send UTF-8 device names in HTTP headers.
+    return [(k, v) for k, v in headers.raw if k.decode('ascii').lower() not in excluded]
 
 
 class ProxyServer(uvicorn.Server):
@@ -151,12 +151,14 @@ class MediaProxy:
         query = request.scope.get('query_string', b'')
         return base.copy_with(raw_path=base.raw_path.rstrip(b'/') + path + (b'?' + query if query else b''))
 
-    def request_headers(self, request):
+    def request_headers(self, request, extra=()):
         headers = safe_headers(request.headers, {'host', 'x-forwarded-for', 'x-forwarded-host',
-                                                 'x-forwarded-proto', 'forwarded', 'x-sbtg-client'})
+                                                 'x-forwarded-proto', 'forwarded', 'x-sbtg-client'} | set(extra))
         if request.client:
-            headers.append(('x-forwarded-for', request.client.host))
-        headers.append(('x-forwarded-proto', 'https' if request.url.scheme in ('https', 'wss') else 'http'))
+            headers.append((b'x-forwarded-for', request.client.host.encode('ascii')))
+        headers.append((b'x-forwarded-proto', b'https' if request.url.scheme in ('https', 'wss') else b'http'))
+        if 'cookie' not in request.headers:
+            headers.append((b'cookie', b''))  # Do not reuse another client's upstream session cookie.
         return headers
 
     async def children(self, parent, refresh=False):
@@ -229,12 +231,12 @@ class MediaProxy:
             return JSONResponse({'detail': '请先登录 Emby'}, status_code=401)
         info_url = self.upstream_url(request, settings, f'/Items/{match[1]}/PlaybackInfo'.encode())
         # Use the caller's credentials, never an administrator API key or cached authorization.
-        headers = [(k, v) for k, v in self.request_headers(request) if k.lower() not in
-                   {'range', 'if-range', 'if-none-match', 'if-modified-since', 'if-match', 'if-unmodified-since',
-                    'content-length', 'content-type'}]
+        headers = self.request_headers(request, {'range', 'if-range', 'if-none-match', 'if-modified-since',
+                                                'if-match', 'if-unmodified-since', 'content-length', 'content-type'})
         info = await self.http.get(info_url, headers=headers)
         if info.status_code in (401, 403, 404):
-            return JSONResponse({'detail': 'Emby 拒绝播放此资源'}, status_code=info.status_code)
+            self.error = f'上游拒绝播放（HTTP {info.status_code}），请检查该入口的登录与资源权限'
+            return JSONResponse({'detail': self.error}, status_code=info.status_code)
         if info.status_code != 200:
             raise CloudError('读取 Emby 播放信息失败')
         try:
@@ -265,8 +267,9 @@ class MediaProxy:
         upstream = await self.http.send(outgoing, stream=True)
         headers = safe_headers(upstream.headers)
         for i, (key, value) in enumerate(headers):
-            if key.lower() == 'location' and value.startswith(settings['upstream_url'] + '/'):
-                headers[i] = (key, value[len(settings['upstream_url']):])
+            prefix = (settings['upstream_url'] + '/').encode('utf-8')
+            if key.lower() == b'location' and value.startswith(prefix):
+                headers[i] = (key, value[len(prefix) - 1:])
         async def content():
             try:
                 async for chunk in upstream.aiter_raw():
@@ -279,7 +282,7 @@ class MediaProxy:
         else:
             response = StreamingResponse(content(), status_code=upstream.status_code,
                                          background=BackgroundTask(upstream.aclose))
-        response.raw_headers = [(k.lower().encode('latin-1'), v.encode('latin-1')) for k, v in headers]
+        response.raw_headers = [(k.lower(), v) for k, v in headers]
         return response
 
     async def handle(self, request):
@@ -294,7 +297,8 @@ class MediaProxy:
                     return response
             return await self.forward(request, settings)
         except (CloudError, httpx.HTTPError, ValueError) as error:
-            self.error = str(error) if isinstance(error, CloudError) else '播放服务连接失败或路径无效，请检查上游地址和目录映射'
+            self.error = (str(error) if isinstance(error, CloudError) else
+                          f'播放转发失败（{type(error).__name__}），请检查上游服务和路径映射')
             return JSONResponse({'detail': self.error}, status_code=502,
                                 headers={'Cache-Control': 'no-store'})
 
@@ -305,9 +309,9 @@ class MediaProxy:
             return
         url = self.upstream_url(client, settings)
         url = url.copy_with(scheme='wss' if url.scheme == 'https' else 'ws')
-        headers = self.request_headers(client)
-        headers = [(k, v) for k, v in headers if not k.lower().startswith('sec-websocket-')]
         try:
+            headers = [(k.decode('ascii'), v.decode('utf-8')) for k, v in self.request_headers(client)
+                       if not k.lower().startswith(b'sec-websocket-')]
             async with connect(str(url), additional_headers=headers, proxy=None, compression=None,
                                subprotocols=client.scope.get('subprotocols') or None,
                                logger=WS_LOG, open_timeout=10) as upstream:
@@ -331,7 +335,7 @@ class MediaProxy:
                     for task in tasks:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
-        except (ConnectionClosed, InvalidHandshake, OSError, TimeoutError, WebSocketDisconnect):
+        except (ConnectionClosed, InvalidHandshake, OSError, TimeoutError, UnicodeError, WebSocketDisconnect):
             pass
         finally:
             try:

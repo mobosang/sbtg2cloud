@@ -344,9 +344,41 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('x-secret', request.headers.get('connection', '').lower())
         self.assertEqual(request.url.params['next'], 'http://evil.test')
 
+    async def test_native_utf8_device_headers_survive_playback_lookup_and_response_forwarding(self):
+        value = '客厅的 Apple TV'.encode('utf-8')
+        headers = [(b'x-emby-token', b'emby-test'), (b'x-emby-device-name', value),
+                   (b'x-emby-authorization', b'MediaBrowser Device="' + value + b'"')]
+        r = await self.client.get('/Videos/123/original.mkv', headers=headers)
+        self.assertEqual(r.status_code, 302)
+        self.assertIn((b'x-emby-device-name', value), self.requests[-1].headers.raw)
+        self.assertIn((b'x-emby-authorization', headers[-1][1]), self.requests[-1].headers.raw)
+        async def native_response(request):
+            self.assertIn((b'x-emby-device-name', value), request.headers.raw)
+            return httpx.Response(200, headers=[(b'x-device-label', value)], stream=httpx.ByteStream(b'control'))
+        await self.media.http.aclose()
+        self.media.http = httpx.AsyncClient(transport=httpx.MockTransport(native_response))
+        r = await self.client.get('/System/Info', headers=headers)
+        self.assertEqual(r.content, b'control')
+        self.assertIn((b'x-device-label', value), r.headers.raw)
+
+    async def test_upstream_login_cookies_are_not_reused_by_another_client(self):
+        def remote(request):
+            if request.url.path.endswith('/AuthenticateByName'):
+                return httpx.Response(200, headers={'Set-Cookie': 'session=first-user; Path=/'}, stream=httpx.ByteStream(b'{}'))
+            return httpx.Response(200, stream=httpx.ByteStream(request.headers.get('cookie', '').encode()))
+        await self.media.http.aclose()
+        self.media.http = httpx.AsyncClient(transport=httpx.MockTransport(remote))
+        await self.client.post('/Users/AuthenticateByName', json={'Username': 'first'})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(self.media.app), base_url='http://proxy.test') as other:
+            self.assertEqual((await other.get('/System/Info')).content, b'')
+            self.assertEqual((await other.get('/System/Info', headers={'Cookie': 'session=second-user'})).content,
+                             b'session=second-user')
+
     async def test_websocket_control_messages_relay_without_using_cloud_credentials(self):
+        device = '客厅 Apple TV'.encode('utf-8')
         async def echo(remote):
             self.assertEqual(remote.request.headers['X-Emby-Token'], 'emby-test')
+            self.assertEqual(remote.request.headers['X-Emby-Device-Name'].encode('ascii', 'surrogateescape'), device)
             async for message in remote:
                 await remote.send(message)
         async with serve(echo, '127.0.0.1', 0) as server:
@@ -356,7 +388,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             scope = {'type': 'websocket', 'asgi': {'version': '3.0'}, 'scheme': 'ws',
                      'path': '/embywebsocket', 'raw_path': b'/embywebsocket', 'query_string': b'',
                      'root_path': '', 'server': ('proxy.test', 80), 'client': ('127.0.0.1', 1234),
-                     'headers': [(b'x-emby-token', b'emby-test')], 'subprotocols': []}
+                     'headers': [(b'x-emby-token', b'emby-test'), (b'x-emby-device-name', device)], 'subprotocols': []}
             task = asyncio.create_task(self.media.app(scope, incoming.get, outgoing.put))
             try:
                 await incoming.put({'type': 'websocket.connect'})
