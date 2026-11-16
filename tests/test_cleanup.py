@@ -43,6 +43,36 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.cloud.cleanup_manifest = AsyncMock(return_value='[]')
         self.cloud.delete_cleanup_folder = AsyncMock(return_value='delete-task')
 
+    async def test_worker_alternates_due_retries_and_receipt_checks_without_starvation(self):
+        self.store.set('cloud_token',{'access_token':'test-only'})
+        self.worker.directory_clear.step=AsyncMock(return_value=False)
+        self.worker.cleanup_due=AsyncMock()
+        cases = [
+            ([('submitted',10),('submitted',20),('queued',200),('queued',300),('queued',400),('queued',500),('queued',2000)],
+             [2,0,3,1,4,5]),
+            ([('submitted',10),('queued',2000),('submitted',20)],[0,2]),
+        ]
+        for jobs, expected in cases:
+            with self.subTest(jobs=jobs):
+                self.store.execute('DELETE FROM jobs')
+                for i,(status,next_at) in enumerate(jobs):
+                    self.enqueue(str(i))
+                    jid=self.store.rows('SELECT id FROM jobs WHERE share_id=?',(str(i),))[0]['id']
+                    self.store.update_job(jid,status=status,next_at=next_at)
+                processed=[]
+                async def process(job):
+                    processed.append(int(job['share_id']))
+                    self.store.update_job(job['id'],status='success')
+                async def sleep(_):
+                    if len(processed)>=len(expected):
+                        raise asyncio.CancelledError()
+                self.worker.process=AsyncMock(side_effect=process)
+                with patch('app.worker.time.time',return_value=1000),patch('app.worker.asyncio.sleep',side_effect=sleep):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await self.worker.run()
+                self.assertEqual(processed,expected)
+                self.assertEqual(len(self.store.rows("SELECT id FROM jobs WHERE status='queued'")),1)
+
     async def test_default_and_legacy_are_never_scheduled(self):
         self.enqueue()
         self.store.update_job(1, status='success')

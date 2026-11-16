@@ -159,12 +159,15 @@ class Worker:
 
     async def run(self):
         next_cleanup_check = 0.0
+        preferred_status = 'queued'
         while True:
             if self.store.get('cloud_token'):
                 async with self.cloud.operation_lock:
                     if not await self.directory_clear.step():
-                        jobs = self.store.rows("SELECT * FROM jobs WHERE status IN ('queued','submitted') AND next_at<=? ORDER BY next_at,id LIMIT 1", (time.time(),))
+                        jobs = self.store.rows("""SELECT * FROM jobs WHERE status IN ('queued','submitted') AND next_at<=?
+                            ORDER BY CASE WHEN status=? THEN 0 ELSE 1 END,next_at,id LIMIT 1""", (time.time(), preferred_status))
                         if jobs:
+                            preferred_status = 'submitted' if jobs[0]['status'] == 'queued' else 'queued'
                             try:
                                 await self.process(jobs[0])
                             except Exception:
