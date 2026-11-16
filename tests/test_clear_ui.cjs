@@ -6,7 +6,7 @@ const path=require('node:path');
 function setup(fetch,confirm=()=>true){
   const elements=new Map(), timers=new Map();let timer=0;
   function element(){return {value:'parent',disabled:false,textContent:'',handlers:{},children:[],
-    addEventListener(event,fn){this.handlers[event]=fn;},
+    addEventListener(event,fn){this.handlers[event]=fn;},removeAttribute(){},
     replaceChildren(...items){this.children=items;},append(item){this.children.push(item);}};}
   const get=id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);};
   const context={document:{getElementById:get,createElement:element},fetch,AbortController,confirm,
@@ -100,4 +100,31 @@ test('confirmed uncertain bulk retry passes explicit permission',async()=>{
   ui.context.refreshJobs=async()=>{};ui.context.refreshState=async()=>{};
   await ui.click('retry-attention');
   assert.deepEqual(JSON.parse(calls[1].body),{ids:[1,2],confirm_uncertain:true});
+});
+test('interval form saves seconds and polling preserves unsaved input',async()=>{
+  const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
+    target:{name:'/Media'},auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
+    cleanup_queue:{pending:75,submitted:1},directory_clear:null,counts:{}};
+  const calls=[];
+  const ui=setup(async(url,options)=>{
+    calls.push({url,body:options.body});
+    if(url.endsWith('/cleanup/interval'))state.cleanup_interval_seconds=JSON.parse(options.body).seconds;
+    return {ok:true,json:async()=>url.endsWith('/state')?state:{ok:true}};
+  });
+  await ui.context.refreshState();
+  assert.match(ui.get('cleanup-queue-summary').textContent,/全部分页.*75.*1/);
+  const input=ui.get('cleanup-interval');input.value='5';input.oninput();
+  await ui.context.refreshState();assert.equal(input.value,'5');
+  const button={disabled:false};
+  await ui.get('cleanup-interval-form').onsubmit({preventDefault(){},target:{querySelector:()=>button}});
+  assert.equal(state.cleanup_interval_seconds,5);
+  assert.equal(state.cleanup_minutes,30);
+  assert.equal(button.disabled,false);
+  assert.deepEqual(JSON.parse(calls.find(x=>x.url.endsWith('/cleanup/interval')).body),{seconds:5});
+});
+test('cleanup shortcut opens the full cleanup filter',async()=>{
+  const ui=setup();let selected;
+  ui.context.filterJobs=async(value,scroll)=>{selected={value,scroll};};
+  await ui.click('show-cleanup');
+  assert.deepEqual(selected,{value:'cleanup',scroll:true});
 });

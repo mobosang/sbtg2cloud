@@ -200,6 +200,29 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_cleanup_filter_and_counts_include_old_task_ids(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main,'DATA',Path(tmp)):
+            with TestClient(main.app) as client:
+                headers={'X-Sbtg-Client':'web'}
+                store=main.app.state.store
+                def seed():
+                    for i in range(1,29):
+                        store.enqueue({'share_id':str(i),'url':'https://example.com','code':''},
+                                      {'id':1,'target_id':None,'target_name':None},i)
+                        store.update_job(i,status='success',cleanup_enabled=1,
+                                         cleanup_state='pending' if i in (1,3) else 'submitted' if i==2 else 'done')
+                    store.update_job(4,status='failed',cleanup_state='pending')
+                    store.update_job(5,cleanup_enabled=0,cleanup_state='pending')
+                client.portal.call(seed)
+                first=client.get('/api/job-pages',headers=headers).json()
+                self.assertFalse(any(j['cleanup_state']=='pending' for j in first['items']))
+                filtered=client.get('/api/job-pages?status_filter=cleanup',headers=headers).json()
+                self.assertEqual(filtered['total'],3)
+                self.assertEqual({j['id'] for j in filtered['items']},{1,2,3})
+                queue=client.get('/api/state',headers=headers).json()['cleanup_queue']
+                self.assertEqual((queue['pending'],queue['submitted']),(2,1))
+
     def test_stats_filters_cover_all_records_and_follow_status_changes(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):

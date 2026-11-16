@@ -113,6 +113,9 @@ async def state():
         'target': store.get('target', {'id': '', 'name': '/'}),
         'auto_cleanup': bool(store.get('auto_cleanup', False)),
         'cleanup_minutes': store.get('cleanup_minutes', 60),
+        'cleanup_interval_seconds': store.get('cleanup_interval_seconds', 30),
+        'cleanup_queue': {r['cleanup_state']: r['n'] for r in store.rows("""SELECT cleanup_state,COUNT(*) n
+            FROM jobs WHERE status='success' AND cleanup_enabled=1 GROUP BY cleanup_state""")},
         'directory_clear': app.state.directory_clear.latest(),
         'counts': {r['status']: r['n'] for r in store.rows('SELECT status,COUNT(*) n FROM jobs GROUP BY status')},
     }
@@ -129,6 +132,16 @@ class CleanupSettings(BaseModel):
 
 class CleanupDelay(BaseModel):
     minutes: int = Field(ge=5, le=600, strict=True)
+
+
+class CleanupInterval(BaseModel):
+    seconds: int = Field(ge=5, le=600, strict=True)
+
+
+@app.post('/api/cleanup/interval')
+async def cleanup_interval(value: CleanupInterval):
+    app.state.store.set('cleanup_interval_seconds', value.seconds)
+    return {'ok': True}
 
 
 @app.post('/api/cleanup/delay')
@@ -343,11 +356,14 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
     if page_size not in (10, 20, 50, 100):
         raise HTTPException(422, '每页数量只支持 10、20、50、100')
     store = app.state.store
-    filters = {'all': (), 'queued': ('queued',), 'attention': ('failed', 'uncertain'), 'discarded': ('discarded',)}
+    filters = {'all': (), 'queued': ('queued',), 'attention': ('failed', 'uncertain'), 'discarded': ('discarded',),
+               'cleanup': ('success',)}
     if status_filter not in filters:
         raise HTTPException(422, '不支持的记录筛选条件')
     statuses = filters[status_filter]
     condition = ' AND j.status IN (' + ','.join('?' for _ in statuses) + ')' if statuses else ''
+    if status_filter == 'cleanup':
+        condition += " AND j.cleanup_enabled=1 AND j.cleanup_state IN ('pending','deleting','submitted')"
     if max_id is None:
         max_id = store.rows('SELECT COALESCE(MAX(id),0) n FROM jobs')[0]['n']
     total = store.rows('SELECT COUNT(*) n FROM jobs j WHERE j.id<=?' + condition, (max_id, *statuses))[0]['n']

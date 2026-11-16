@@ -158,7 +158,7 @@ class Worker:
             await self.cleanup(jobs[0])
 
     async def run(self):
-        next_cleanup_check = 0.0
+        last_cleanup_check = None
         preferred_status = 'queued'
         while True:
             if self.store.get('cloud_token'):
@@ -172,7 +172,8 @@ class Worker:
                                 await self.process(jobs[0])
                             except Exception:
                                 self.store.update_job(jobs[0]['id'], status='uncertain', error='处理异常，请检查任务与云盘状态')
-                        if time.monotonic() >= next_cleanup_check:
+                        if (last_cleanup_check is None or time.monotonic() - last_cleanup_check
+                                >= self.store.get('cleanup_interval_seconds', 30)):
                             await self.cleanup_due()
-                            next_cleanup_check = time.monotonic() + 30
+                            last_cleanup_check = time.monotonic()
             await asyncio.sleep(1)

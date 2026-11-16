@@ -144,6 +144,22 @@ class ClearTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClearWebTests(unittest.TestCase):
+    def test_cleanup_interval_validation_and_persistence(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main,'DATA',Path(tmp)):
+            headers={'X-Sbtg-Client':'web'}
+            with TestClient(main.app) as client:
+                self.assertEqual(client.get('/api/state',headers=headers).json()['cleanup_interval_seconds'],30)
+                for value in (4,601,5.5,'30',True):
+                    self.assertEqual(client.post('/api/cleanup/interval',headers=headers,json={'seconds':value}).status_code,422)
+                for value in (5,600,10):
+                    self.assertEqual(client.post('/api/cleanup/interval',headers=headers,json={'seconds':value}).status_code,200)
+                    state=client.get('/api/state',headers=headers).json()
+                    self.assertEqual(state['cleanup_interval_seconds'],value)
+                    self.assertEqual(state['cleanup_minutes'],60)
+            with TestClient(main.app) as client:
+                self.assertEqual(client.get('/api/state',headers=headers).json()['cleanup_interval_seconds'],10)
+
     def test_delay_validation_and_clear_api(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main,'DATA',Path(tmp)):

@@ -73,6 +73,25 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(processed,expected)
                 self.assertEqual(len(self.store.rows("SELECT id FROM jobs WHERE status='queued'")),1)
 
+    async def test_cleanup_interval_changes_apply_without_restart(self):
+        self.store.set('cloud_token',{'access_token':'test-only'})
+        self.worker.directory_clear.step=AsyncMock(return_value=False)
+        clock=[0]
+        checks=[]
+        async def cleanup():
+            checks.append(clock[0])
+        async def sleep(_):
+            clock[0]+=1
+            if clock[0]==1:self.store.set('cleanup_interval_seconds',600)
+            if clock[0]==6:self.store.set('cleanup_interval_seconds',5)
+            if clock[0]==7:self.store.set('cleanup_interval_seconds',30)
+            if clock[0]==12:raise asyncio.CancelledError()
+        self.worker.cleanup_due=AsyncMock(side_effect=cleanup)
+        with patch('app.worker.time.monotonic',side_effect=lambda:clock[0]),patch('app.worker.asyncio.sleep',side_effect=sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.worker.run()
+        self.assertEqual(checks,[0,6])
+
     async def test_default_and_legacy_are_never_scheduled(self):
         self.enqueue()
         self.store.update_job(1, status='success')
