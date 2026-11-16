@@ -189,6 +189,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_persistent_cache_is_reused_after_store_and_proxy_restart(self):
         await self.media.signed_url('/Media/影片/视频.mkv')
+        self.store.execute('UPDATE media_links SET retained_until=created+86400')
         self.store.db.close()
         self.store = Store(self.tmp.name)
         self.cloud.store = self.store
@@ -198,18 +199,21 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             self.cloud.download_url.assert_awaited_once()
             self.assertEqual(self.cloud.pages.await_count, 3)
             self.assertEqual(self.store.media_cache_page(1)['items'][0]['hits'], 1)
+            row = self.store.rows('SELECT expires_at,retained_until FROM media_links')[0]
+            self.assertEqual(row['expires_at'], row['retained_until'])
         finally:
             await restarted.close()
 
-    async def test_cache_retention_is_24_hours_but_reuse_never_exceeds_provider_expiry(self):
-        for duration, expected in [(172800, 96400), (3600, 13595), (0, 10000)]:
+    async def test_cache_record_and_url_follow_provider_expiry_without_a_fixed_day_limit(self):
+        for duration, expected in [(172800, 182795), (3600, 13595), (0, 10000)]:
             self.store.execute('DELETE FROM media_links')
             self.cloud.download_url.return_value = (LINK, duration)
             with patch('app.media.time.time', return_value=10000):
                 await self.media.signed_url('/Media/影片/视频.mkv')
-                row = self.store.media_cache_page(1)['items'][0]
-                self.assertEqual(row['retained_until'], 96400)
+                row = self.store.rows('SELECT expires_at,retained_until FROM media_links')[0]
+                self.assertEqual(row['retained_until'], expected)
                 self.assertEqual(row['expires_at'], expected)
+                self.assertEqual(self.store.media_cache_page(1)['total'], int(duration > 0))
 
     async def test_token_refresh_preserves_links_and_new_qr_login_clears_them(self):
         await self.media.signed_url('/Media/影片/视频.mkv')
@@ -233,11 +237,13 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('会话已切换', r.json()['detail'])
         self.assertEqual(self.store.rows('SELECT COUNT(*) n FROM media_links')[0]['n'], 0)
 
-    async def test_records_older_than_24_hours_are_pruned_locally(self):
+    async def test_expired_records_are_pruned_but_older_valid_links_are_kept(self):
         owner = self.store.get('cloud_cache_owner')
         self.store.save_media_link(owner, '/old/video.mkv', 'old', LINK, time.time() - 86401, time.time() + 3600)
-        self.assertIsNone(self.store.media_link(owner, '/old/video.mkv', time.time()))
-        self.assertEqual(self.store.media_cache_page(1)['total'], 0)
+        self.assertEqual(self.store.media_link(owner, '/old/video.mkv', time.time()), LINK)
+        self.store.save_media_link(owner, '/expired.mkv', 'expired', LINK, time.time() - 20, time.time() - 1)
+        self.assertIsNone(self.store.media_link(owner, '/expired.mkv', time.time()))
+        self.assertEqual(self.store.media_cache_page(1)['total'], 1)
         self.cloud.download_url.assert_not_awaited()
 
     async def test_lookup_failure_does_not_silently_stream_through_the_nas(self):
@@ -352,19 +358,19 @@ class MediaWebTests(unittest.TestCase):
                     store.save_cloud_token({'access_token': 'test-only', 'refresh_token': 'refresh-only',
                                             'expires_at': time.time() + 3600})
                     owner, now = store.get('cloud_cache_owner'), time.time()
-                    for i in range(21):
+                    for i in range(22):
                         store.save_media_link(owner, f'/Media/{i}.mkv', str(i), LINK, now,
                                               now + 3600 if i else now - 1)
                 client.portal.call(seed)
                 self.assertEqual(client.get('/api/media/cache').status_code, 403)
                 first = client.get('/api/media/cache', headers=headers)
-                self.assertEqual((first.json()['total'], first.json()['valid'], first.json()['pages']), (21, 20, 2))
+                self.assertEqual((first.json()['total'], first.json()['valid'], first.json()['pages']), (21, 21, 2))
                 self.assertEqual(len(first.json()['items']), 20)
                 self.assertNotIn('temporary-test', first.text)
                 self.assertNotIn('refresh-only', first.text)
                 second = client.get('/api/media/cache?page=2', headers=headers).json()
                 self.assertEqual(len(second['items']), 1)
-                self.assertEqual(second['items'][0]['usable'], 0)
+                self.assertEqual(second['items'][0]['usable'], 1)
                 with patch.object(main.app.state.cloud, 'raw', new_callable=AsyncMock) as raw:
                     result = client.post('/api/media/cache/clear', headers=headers, json={})
                     self.assertEqual(result.json(), {'cleared': 21})

@@ -173,21 +173,21 @@ test('cleanup resource cards show safe names, real stages and empty states',()=>
 
 test('cache list shows safe names, expiry, hit counts and pagination without exposing URLs',async()=>{
   const calls=[];
-  const entry={path:'/Media/<video>.mkv',created:100,expires_at:200,retained_until:86500,last_used:150,hits:7,usable:true};
+  const entry={path:'/Media/<video>.mkv',created:100,expires_at:200,retained_until:200,last_used:150,hits:7,usable:true};
   const ui=setup(async url=>{
     calls.push(url);const page=url.includes('page=2')?2:1;
-    return {ok:true,json:async()=>({page,pages:2,page_size:20,total:21,valid:20,retention_hours:24,
+    return {ok:true,json:async()=>({page,pages:2,page_size:20,total:21,valid:21,
       items:[{...entry,usable:page===1}]})};
   });
   await ui.context.refreshMediaCache();
-  assert.match(ui.get('media-cache-summary').textContent,/24.*21.*20.*1/);
+  assert.match(ui.get('media-cache-summary').textContent,/与直链同步到期.*21/);
   const row=ui.get('media-cache-items').children[0];
   assert.equal(row.children[0].children[0].textContent,'<video>.mkv');
   assert.equal(row.children[3].textContent,'7');
   assert.equal(ui.get('media-cache-prev').disabled,true);
   await ui.get('media-cache-next').onclick();
   assert.equal(ui.get('media-cache-next').disabled,true);
-  assert.match(ui.get('media-cache-items').children[0].children[2].children[0].textContent,/已过期.*下次播放刷新/);
+  assert.match(ui.get('media-cache-items').children[0].children[2].children[0].textContent,/已到期.*等待列表刷新/);
   assert.equal(calls.length,2);
 });
 
@@ -195,7 +195,7 @@ test('clear cache requires confirmation and then refreshes the local list',async
   const calls=[];
   const ui=setup(async url=>{
     calls.push(url);return {ok:true,json:async()=>url.endsWith('/clear')?{cleared:2}:
-      {page:1,pages:1,page_size:20,total:0,valid:0,retention_hours:24,items:[]}};
+      {page:1,pages:1,page_size:20,total:0,valid:0,items:[]}};
   });
   await ui.click('clear-media-cache');
   assert.deepEqual(calls,['/api/media/cache/clear','/api/media/cache?page=1']);

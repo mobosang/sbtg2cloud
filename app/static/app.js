@@ -91,15 +91,14 @@ async function refreshMediaCache(){
   const data=await api('/media/cache?page='+mediaCachePage);
   if(request!==mediaCacheRequest)return;
   mediaCachePage=data.page;mediaCachePages=data.pages;
-  $('media-cache-summary').textContent='保存 '+data.retention_hours+' 小时 · 共 '+data.total+' 条，有效 '+data.valid+' 条，待刷新 '+(data.total-data.valid)+' 条。';
+  $('media-cache-summary').textContent='与直链同步到期 · 共 '+data.total+' 条有效缓存。';
   $('media-cache-page').textContent='第 '+data.page+' / '+data.pages+' 页 · 每页 '+data.page_size+' 条';
   $('media-cache-prev').disabled=data.page<=1;$('media-cache-next').disabled=data.page>=data.pages;
   const list=$('media-cache-items');list.replaceChildren();
   for(const entry of data.items){
     const row=text('tr',''),name=text('td',''),expiry=text('td','');
     name.append(text('strong',entry.path.split('/').at(-1)),text('small',entry.path));
-    expiry.append(text('span',entry.usable?new Date(entry.expires_at*1000).toLocaleString():'已过期，下次播放刷新'),
-      text('small','记录保留至：'+new Date(entry.retained_until*1000).toLocaleString()));
+    expiry.append(text('span',entry.usable?new Date(entry.expires_at*1000).toLocaleString():'已到期，等待列表刷新'));
     row.append(name,text('td',new Date(entry.created*1000).toLocaleString()),expiry,text('td',String(entry.hits)),
       text('td',new Date(entry.last_used*1000).toLocaleString()));
     list.append(row);

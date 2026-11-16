@@ -24,10 +24,10 @@
 <form id="media-form"><label class="media-toggle"><input id="media-enabled" type="checkbox">启用光鸭 302</label><div class="media-fields"><label>Emby / MediaTidy 上游地址<input id="media-upstream" type="url" placeholder="http://emby.example:8096" maxlength="2048" autocomplete="off"></label><label>Emby 中的光鸭挂载路径<input id="media-prefix" placeholder="/CloudNAS/CloudDrive/光鸭云盘" maxlength="4096" autocomplete="off"></label><label>光鸭内对应目录<input id="media-cloud-prefix" value="/" placeholder="/" maxlength="4096" autocomplete="off"></label></div><button>保存播放配置</button></form>
 <label>客户端播放入口<input id="media-address" readonly aria-describedby="media-hint"></label><p id="media-hint" class="hint">配置后使用原 Emby 账号登录。此入口不提供管理页面。</p>
 <p id="media-last" class="hint" role="status"></p><p id="media-error" class="error" role="status"></p>
-<div class="section-head media-cache-head"><h3>直链缓存 · 保存 24 小时</h3><div class="actions"><button id="refresh-media-cache" class="secondary">刷新缓存列表</button><button id="clear-media-cache" class="secondary">清空直链缓存</button></div></div>
-<p class="hint">有效缓存可供不同 Emby 用户复用，每次播放仍检查用户权限。可复用时间不超过光鸭签名有效期；过期后仅在下次播放时重新取链，不提前访问云盘。命中次数包含 GET、HEAD 和拖动请求，不代表人数。</p>
+<div class="section-head media-cache-head"><h3>直链缓存 · 随链接到期</h3><div class="actions"><button id="refresh-media-cache" class="secondary">刷新缓存列表</button><button id="clear-media-cache" class="secondary">清空直链缓存</button></div></div>
+<p class="hint">有效缓存可供不同 Emby 用户复用，每次播放仍检查用户权限。直链和记录按光鸭返回的有效期同步到期，提前保留 5 秒安全余量；下次访问列表或缓存时移除到期记录，仅在下次播放时重新取链。命中次数包含 GET、HEAD 和拖动请求，不代表人数。</p>
 <p id="media-cache-summary" class="hint" role="status"></p>
-<div class="table-wrap"><table id="media-cache-table"><thead><tr><th>资源 / 光鸭路径</th><th>获取时间</th><th>可复用至 / 记录保留至</th><th>命中次数</th><th>最近使用</th></tr></thead><tbody id="media-cache-items"></tbody></table></div>
+<div class="table-wrap"><table id="media-cache-table"><thead><tr><th>资源 / 光鸭路径</th><th>获取时间</th><th>缓存及记录到期时间</th><th>命中次数</th><th>最近使用</th></tr></thead><tbody id="media-cache-items"></tbody></table></div>
 <nav class="pagination" aria-label="直链缓存分页"><span id="media-cache-page" aria-live="polite">第 1 / 1 页</span><button id="media-cache-prev" class="secondary" disabled>上一页缓存</button><button id="media-cache-next" class="secondary" disabled>下一页缓存</button></nav>
 <p class="hint">链接提前失效时，可清空直链缓存后重新播放；这不会删除云盘文件或影响已开始的 CDN 连接。光鸭文件移动或删除后需要更新媒体库；请勿让自动清理删除仍需播放的文件。所有入口仅向可信局域网开放。</p>
 </section>

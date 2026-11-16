@@ -65,6 +65,7 @@ class Store:
         if self.get('cloud_token') and not self.get('cloud_cache_owner'):
             self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
                             ('cloud_cache_owner', json.dumps(secrets.token_hex(16))))
+        self.db.execute('UPDATE media_links SET retained_until=expires_at WHERE retained_until!=expires_at')
         self.db.commit()
 
     def get(self, key, default=None):
@@ -103,16 +104,16 @@ class Store:
 
     def save_media_link(self, owner, path, file_id, url, created, expires_at):
         with self.db:
-            self.db.execute('DELETE FROM media_links WHERE retained_until<=?', (created,))
+            self.db.execute('DELETE FROM media_links WHERE expires_at<=?', (created,))
             self.db.execute('''INSERT INTO media_links(owner,path,file_id,url,created,expires_at,retained_until,last_used)
                 VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(owner,path) DO UPDATE SET
                 file_id=excluded.file_id,url=excluded.url,created=excluded.created,expires_at=excluded.expires_at,
                 retained_until=excluded.retained_until,hits=0,last_used=excluded.last_used''',
-                (owner, path, file_id, url, created, expires_at, created + 86400, created))
+                (owner, path, file_id, url, created, expires_at, expires_at, created))
 
     def media_cache_page(self, page, page_size=20):
         now, owner = time.time(), self.get('cloud_cache_owner', '')
-        self.execute('DELETE FROM media_links WHERE retained_until<=?', (now,))
+        self.execute('DELETE FROM media_links WHERE expires_at<=?', (now,))
         stats = self.rows('''SELECT COUNT(*) total,COALESCE(SUM(expires_at>?),0) valid
             FROM media_links WHERE owner=?''', (now, owner))[0]
         pages = max(1, (stats['total'] + page_size - 1) // page_size)
@@ -121,7 +122,7 @@ class Store:
         items = self.rows('''SELECT id,path,created,expires_at,retained_until,hits,last_used,
             expires_at>? AS usable FROM media_links WHERE owner=? ORDER BY last_used DESC,id DESC LIMIT ? OFFSET ?''',
             (now, owner, page_size, (page - 1) * page_size))
-        return {**stats, 'items': items, 'page': page, 'pages': pages, 'page_size': page_size, 'retention_hours': 24}
+        return {**stats, 'items': items, 'page': page, 'pages': pages, 'page_size': page_size}
 
     def rows(self, sql, params=()):
         return [dict(x) for x in self.db.execute(sql, params).fetchall()]

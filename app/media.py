@@ -210,7 +210,7 @@ class MediaProxy:
                 raise CloudError('光鸭登录会话已切换，请重新播放')
             created = time.time()
             self.store.save_media_link(owner, path, fid, url, created,
-                                       min(created + 86400, started + max(0, duration - 5)))
+                                       started + max(0, duration - 5))
             return url
 
     async def redirect(self, request, settings, match):
