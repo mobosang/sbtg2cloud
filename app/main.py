@@ -21,6 +21,7 @@ from .telegram import Telegram
 from .worker import Worker
 from .cleanup import history_preview, queue_history
 from .directory_clear import DirectoryClear
+from .media import MediaProxy, media_settings
 
 DATA = Path(os.environ.get('DATA_DIR', './data'))
 STATIC = Path(__file__).parent / 'static'
@@ -45,6 +46,8 @@ async def lifespan(app):
     app.state.cloud_qr = {'state': 'idle'}
     app.state.cloud_login_task = None
     app.state.worker = Worker(store, cloud)
+    app.state.media = MediaProxy(store, cloud)
+    await app.state.media.start()
     tasks = [asyncio.create_task(tg.run()), asyncio.create_task(app.state.worker.run())]
     yield
     if app.state.cloud_login_task:
@@ -53,6 +56,7 @@ async def lifespan(app):
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await tg.close()
+    await app.state.media.close()
     await cloud.http.aclose()
     store.db.close()
 
@@ -118,6 +122,7 @@ async def state():
         'cleanup_queue': {r['cleanup_state']: r['n'] for r in store.rows("""SELECT cleanup_state,COUNT(*) n
             FROM jobs WHERE status='success' AND cleanup_enabled=1 GROUP BY cleanup_state""")},
         'cleanup_progress': store.cleanup_progress(app.state.worker.current_cleanup_id),
+        'media_proxy': app.state.media.status(),
         'directory_clear': app.state.directory_clear.latest(),
         'counts': {r['status']: r['n'] for r in store.rows('SELECT status,COUNT(*) n FROM jobs GROUP BY status')},
     }
@@ -126,6 +131,27 @@ async def state():
 class Credentials(BaseModel):
     api_id: int = Field(gt=0)
     api_hash: str = Field(pattern=r'^[a-fA-F0-9]{32}$')
+
+
+class MediaSettings(BaseModel):
+    enabled: bool = Field(strict=True)
+    upstream_url: str = Field(default='', max_length=2048)
+    emby_prefix: str = Field(default='', max_length=4096)
+    cloud_prefix: str = Field(default='/', max_length=4096)
+
+
+@app.post('/api/media/settings')
+async def save_media_settings(value: MediaSettings, request: Request):
+    settings = media_settings(value.model_dump())
+    parsed = urlsplit(settings['upstream_url'])
+    if (settings['enabled'] and parsed.hostname in (request.url.hostname, 'localhost', '127.0.0.1', '::1', 'sbtg2cloud')
+        and str(parsed.port or (443 if parsed.scheme == 'https' else 80)) in (
+            str(request.url.port or 80), os.environ.get('EMBY_PROXY_PORT', '12359'),
+            os.environ.get('EMBY_PROXY_LISTEN_PORT', ''), '8080')):
+        raise HTTPException(400, '上游地址不可指向 sbtg2cloud 自身的管理或播放端口')
+    app.state.store.set('media_proxy', settings)
+    app.state.media.error = ''
+    return {'ok': True}
 
 
 class CleanupSettings(BaseModel):

@@ -45,6 +45,16 @@
 
 ## 安全与运行模型
 
+### 光鸭取链与 Emby 播放入口（2026-11-16）
+
+依据用户提供的[官方 Drive Skill 1.0.2](https://gyp.guangyapan.com/guangyapan_drive/guangyapan-drive-1.0.2-bundled.zip) 中 `src/api-client.mjs` 的 `downloadUrl(fileId, requestId)`，调用 `POST /userres/v1/get_res_download_url`，参数为 `fileId` 和空 `requestId`，读取 `data.signedURL`。这与现有扫码会话共用令牌和请求限速，不引入 SDK 或其他光鸭登录方式。下载链接只接受 HTTPS 及 `guangyacdn.com` / `guangyapan.com` 域名边界；域名变化时明确报错，不把任意地址作为跳转目标。不能据此承诺客户端的“直链分享”权益、长期有效性或下载速度。
+
+[Emby PlaybackInfo](https://dev.emby.media/reference/RestAPI/MediaInfoService/getItemsByIdPlaybackinfo.html) 声明需要用户认证。播放入口将原客户端凭据传给固定上游，未经成功响应不访问光鸭，不使用管理员密钥替代用户身份。媒体定位仅使用响应中的 MediaSources，`MediaSourceId` 不匹配或版本不唯一时留给上游处理；不接受客户端自报的光鸭文件 ID。[Emby 视频流接口](https://dev.emby.media/reference/RestAPI/VideoService/getVideosByIdStream.html) 中 `Static=true` 表示无编码的原始文件，本实现据此限制重定向范围，HLS 和烧录字幕不强制跳转。SenPlayer 为本阶段目标客户端，其他客户端未经现场验证不宣称兼容。
+
+新增的 `media_proxy` 设置通过现有 settings 表保存，不修改任务表、监听、转存或清理语义。可选的第二 Uvicorn 监听器运行在主进程同一事件循环，复用现有 Store 和 Cloud，避免多实例读取 Telegram 会话。WebSocket 仅用于转发 Emby 控制消息，使用 `websockets==15.0.1`，显式关闭环境代理和协议调试日志。
+
+现场接口只读验证：复用已有扫码令牌，为一部既有影片获取 `signedURL` 成功；CDN 对 `bytes=0-1023`、`bytes=100000-101023` 均返回 HTTP 206 及正确 Content-Range，每次仅读取 1 KiB。未改动云盘文件或转存任务。这证明取链和分段接口可用，不代表 SenPlayer 设备端起播、持续速度或所有客户端已验证。
+
 所有云盘 HTTP 请求固定发往 account/api.guangyapan.com，不请求消息提供的任意地址；严格校验分享主机和路径，避免服务端任意 URL 访问。管理 API 要求同源及自定义请求头，拒绝跨站请求；页面使用 textContent 展示频道和服务数据，CSP 限制脚本来源。此机制不代替身份认证，局域网其他可访问端口的设备可管理该服务。
 
 单进程 asyncio + 单消费者，SQLite WAL 持久化；`submitting` 在发出写请求前落盘，得到云端 taskId 后切换 `submitted`。仍存在服务端已接受但本地未保存回执的窗口，此时保守转为 `uncertain`，由用户核对，无法承诺跨云服务 exactly-once。

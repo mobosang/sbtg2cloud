@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+from urllib.parse import urlsplit
 import httpx
 from .proxy import validate_http_environment, ProxyConfigError
 
@@ -176,6 +177,23 @@ class Cloud:
         rows = await self.pages('/file/get_file_list', {'parentId': parent})
         return [{'id': str(x.get('id', x.get('fileId'))), 'name': x.get('name', x.get('fileName', '未命名'))}
                 for x in rows if x.get('resType') == 2 or x.get('isDir') in (True, 1) or x.get('kind') == 'drive#folder']
+
+    async def download_url(self, file_id):
+        data = await self.call('/get_res_download_url', {'fileId': file_id, 'requestId': ''})
+        url = data.get('signedURL') if isinstance(data, dict) else None
+        try:
+            parsed = urlsplit(url) if isinstance(url, str) else None
+            valid = (parsed and parsed.scheme == 'https' and parsed.hostname
+                     and any(parsed.hostname == host or parsed.hostname.endswith('.' + host)
+                             for host in ('guangyacdn.com', 'guangyapan.com'))
+                     and not parsed.username and not parsed.password and parsed.port in (None, 443)
+                     and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise CloudError('光鸭未返回可用的 HTTPS 下载直链，或下载域名已变化')
+        duration = data.get('urlDuration', 60)
+        return url, duration if isinstance(duration, (int, float)) and duration >= 0 else 60
 
     async def history_files(self, parent):
         # Only previews may use stale listings. Deletion preflight always reads fresh data.

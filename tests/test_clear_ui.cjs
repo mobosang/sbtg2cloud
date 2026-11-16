@@ -128,6 +128,33 @@ test('cleanup shortcut opens the full cleanup filter',async()=>{
   await ui.click('show-cleanup');
   assert.deepEqual(selected,{value:'cleanup',scroll:true});
 });
+
+test('media settings preserve edits during polling and save the playback mapping',async()=>{
+  const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
+    target:{name:'/Media'},auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:30,
+    cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{},
+    media_proxy:{enabled:false,listening:true,upstream_url:'http://emby.test:8096',emby_prefix:'/Cloud/Guangya',
+      cloud_prefix:'/',public_port:'12359',redirects:1,last:{name:'<video>.mkv',at:100},error:''}};
+  const calls=[];
+  const ui=setup(async(url,options)=>{
+    calls.push({url,body:options.body});
+    if(url.endsWith('/media/settings'))Object.assign(state.media_proxy,JSON.parse(options.body));
+    return {ok:true,json:async()=>url.endsWith('/state')?state:{ok:true}};
+  });
+  ui.context.location={hostname:'192.0.2.1'};
+  await ui.context.refreshState();
+  assert.equal(ui.get('media-address').value,'http://192.0.2.1:12359');
+  assert.match(ui.get('media-last').textContent,/<video>\.mkv/);
+  ui.get('media-prefix').value='/CloudNAS/Guangya';ui.get('media-enabled').checked=true;
+  ui.get('media-form').handlers.input();
+  await ui.context.refreshState();assert.equal(ui.get('media-prefix').value,'/CloudNAS/Guangya');
+  const button={disabled:false};
+  await ui.get('media-form').onsubmit({preventDefault(){},target:{querySelector:()=>button}});
+  assert.deepEqual(JSON.parse(calls.find(x=>x.url.endsWith('/media/settings')).body),{
+    enabled:true,upstream_url:'http://emby.test:8096',emby_prefix:'/CloudNAS/Guangya',cloud_prefix:'/'});
+  assert.equal(ui.get('media-state').textContent,'已启用');
+  assert.equal(button.disabled,false);
+});
 test('cleanup resource cards show safe names, real stages and empty states',()=>{
   const ui=setup();
   for(const [phase,label] of [['checking','正在核对目录内容'],['deleting','正在提交删除'],
