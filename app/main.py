@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from .cloud import Cloud, CloudError
 from .store import Store
+from .extract import extract
 from .telegram import Telegram
 from .worker import Worker
 from .cleanup import history_preview, queue_history
@@ -393,9 +394,27 @@ async def source(source_id: int, value: SourceUpdate):
     return {'ok': True}
 
 
+class ManualShare(BaseModel):
+    text: str = Field(min_length=1, max_length=4096)
+
+
+@app.post('/api/jobs/manual')
+async def manual_share(value: ManualShare):
+    links = extract(value.text)
+    if len(links) != 1:
+        raise HTTPException(400, '请输入一个有效的光鸭云盘分享链接，可附提取码；不支持中转站链接')
+    store = app.state.store
+    job_id = store.enqueue(links[0], {'id': 0, 'target_id': None, 'target_name': None}, 0)
+    if job_id is None:
+        job = store.rows('SELECT id,status FROM jobs WHERE share_id=?', (links[0]['share_id'],))[0]
+        return {'created': False, 'job_id': job['id'], 'status': job['status']}
+    return {'created': True, 'job_id': job_id, 'status': 'queued'}
+
+
 @app.get('/api/jobs')
 async def jobs(before: int = 0):
-    items = app.state.store.rows('''SELECT j.*,s.title source_title FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
+    items = app.state.store.rows('''SELECT j.*,CASE WHEN j.source_id=0 THEN '手动提交' ELSE s.title END source_title
+      FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
       WHERE (?=0 OR j.id<?) ORDER BY j.id DESC LIMIT 100''', (before, before))
     for item in items:
         item.pop('cleanup_manifest', None)
@@ -422,7 +441,8 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
     total = store.rows('SELECT COUNT(*) n FROM jobs j WHERE j.id<=?' + condition, (max_id, *statuses))[0]['n']
     pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, pages)
-    items = store.rows('''SELECT j.*,s.title source_title FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
+    items = store.rows('''SELECT j.*,CASE WHEN j.source_id=0 THEN '手动提交' ELSE s.title END source_title
+      FROM jobs j LEFT JOIN sources s ON s.id=j.source_id
       WHERE j.id<=?''' + condition + ' ORDER BY j.id DESC LIMIT ? OFFSET ?', (max_id, *statuses, page_size, (page - 1) * page_size))
     for item in items:
         item.pop('cleanup_manifest', None)

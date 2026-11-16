@@ -6,6 +6,18 @@ const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',subm
 let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false;
 const mediaDirty=new Set();
 let mediaCachePage=1, mediaCachePages=1, mediaCacheRequest=0;
+const pages={overview:'概览',telegram:'Telegram',cloud:'光鸭云盘',sources:'监听来源',jobs:'转存记录',cleanup:'自动清理',media:'302 播放'};
+function showPage(page){
+  if(!Object.hasOwn(pages,page))page='overview';
+  for(const id of Object.keys(pages)){
+    $('page-'+id).hidden=id!==page;
+    if(id===page)$('nav-'+id).setAttribute('aria-current','page');
+    else $('nav-'+id).removeAttribute('aria-current');
+  }
+  document.title=pages[page]+' · TG → 光鸭';
+}
+window.addEventListener('hashchange',()=>showPage(location.hash.slice(1)));
+showPage(location.hash.slice(1));
 function text(tag, value, cls) { const e=document.createElement(tag); e.textContent=value; if(cls)e.className=cls; return e; }
 function toast(message) { $('notice').textContent=message; $('notice').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('notice').hidden=true,7000); }
 async function api(path, body, signal) {
@@ -41,6 +53,7 @@ async function refreshState(){
   $('cloud-error').textContent=s.cloud.error||'';
   image('cloud-image',s.cloud.qr);
   $('target').textContent=s.target.name;
+  $('manual-share-target').textContent=s.target.name;
   cleanupEnabled=s.auto_cleanup;
   cleanupMinutes=s.cleanup_minutes;
   if(!delayDirty)$('cleanup-delay').value=cleanupMinutes;
@@ -197,6 +210,17 @@ action('history-preview',()=>previewHistory(1));
 action('history-prev',()=>previewHistory(historyPage-1));
 action('history-next',()=>previewHistory(historyPage+1));
 async function refreshSources(){sourceList=await api('/sources');renderSources();}
+$('manual-share-form').onsubmit=async e=>{
+  e.preventDefault();const button=$('manual-share-submit');
+  if(button.disabled)return;
+  button.disabled=true;const input=$('manual-share-link'),submitted=input.value.trim();
+  try{
+    const result=await api('/jobs/manual',{text:submitted});
+    if(input.value.trim()===submitted)input.value='';
+    await filterJobs('all');await refreshState();
+    toast(result.created?'已加入转存队列，记录 #'+result.job_id:'链接已有记录 #'+result.job_id+'（'+(jobStates[result.status]||result.status)+'），未重复转存');
+  }catch(error){toast(error.message);}finally{button.disabled=false;}
+};
 function renderSources(){
   $('save-sources').hidden=!editingSources;
   $('cancel-sources').hidden=!editingSources;
@@ -268,7 +292,7 @@ async function refreshJobs(){
   const jobs=result.items;visibleJobs=jobs;$('jobs').replaceChildren();for(const job of jobs){const row=document.createElement('tr'),share=document.createElement('td'),link=text('a','#'+job.id+' '+(job.resource_name||'资源名称待补全'));link.href=job.url;link.target='_blank';link.rel='noreferrer';share.append(link,text('small',job.share_id),text('small',(job.source_title||'未知来源')+' · '+new Date(job.created*1000).toLocaleString()));const status=text('td',jobStates[job.status]||job.status);if(job.error)status.append(text('small',job.error,'job-error'));if(job.completed_at)status.append(text('small','转存成功：'+new Date(job.completed_at*1000).toLocaleString()));if(job.cleanup_state)status.append(text('small',cleanupStates[job.cleanup_state]||job.cleanup_state));if(job.cleanup_state==='pending')status.append(text('small','到期：'+new Date(((job.completed_at??job.created)+(cleanupMinutes*60))*1000).toLocaleString()+(cleanupEnabled?'':'（已暂停）')));if(job.cleanup_error)status.append(text('small',job.cleanup_error,'job-error'));const operations=document.createElement('td');if(['failed','uncertain'].includes(job.status)){const b=text('button','重试 / 补码','secondary');b.onclick=async()=>{if(job.status==='uncertain'&&!confirm('请先检查云盘。确认这次分享尚未转存，仍要重新提交吗？'))return;const code=prompt('补填提取码（留空保留原值）：','');if(code===null)return;b.disabled=true;try{await api('/jobs/'+job.id+'/retry',{code,confirm_uncertain:job.status==='uncertain'});await refreshJobs();}catch(e){toast(e.message);}finally{b.disabled=false;}};operations.append(b,discardButton(job));}row.append(share,text('td',job.target_name+(job.cleanup_folder&&job.remote_task&&job.cleanup_name.startsWith('sbtg-')?'/'+job.cleanup_name:'')),status,operations);$('jobs').append(row);}if(!jobs.length){const r=document.createElement('tr'),c=text('td',jobsFilter==='all'?'暂无记录。启用监听后，新发现的分享会出现在这里。':jobsFilter==='queued'?'暂无待处理记录。':jobsFilter==='discarded'?'暂无已丢弃记录。':jobsFilter==='cleanup'?'暂无待清理任务。':'暂无需要处理的记录。','empty');c.colSpan=4;r.append(c);$('jobs').append(r);}}
 async function filterJobs(value,scroll=false){
   jobsFilter=value;jobsPage=1;jobsMaxId=null;$('job-filter').value=value;
-  if(scroll){$('jobs-heading').focus({preventScroll:true});$('jobs-section').scrollIntoView({behavior:'smooth',block:'start'});}
+  if(scroll){location.hash='jobs';showPage('jobs');$('jobs-heading').focus({preventScroll:true});$('jobs-section').scrollIntoView({behavior:'smooth',block:'start'});}
   await refreshJobs();
 }
 action('show-queued',()=>filterJobs('queued',true));

@@ -200,11 +200,12 @@ class Store:
         target_id = source['target_id'] if source['target_id'] is not None else default['id']
         target_name = source['target_name'] if source['target_id'] is not None else default['name']
         now = time.time()
-        self.execute('''INSERT OR IGNORE INTO jobs
+        result = self.execute('''INSERT OR IGNORE INTO jobs
           (share_id,url,code,source_id,message_id,target_id,target_name,created,updated,resource_name,cleanup_enabled)
           VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
           (link['share_id'], link['url'], link['code'], source['id'], message_id, target_id, target_name, now, now, resource_name,
            bool(self.get('auto_cleanup', False))))
+        return result.lastrowid if result.rowcount else None
 
     def save_sources(self, sources):
         ids = [source['id'] for source in sources]

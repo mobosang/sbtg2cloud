@@ -3,18 +3,85 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
-function setup(fetch,confirm=()=>true){
-  const elements=new Map(), timers=new Map();let timer=0;
-  function element(){return {value:'parent',disabled:false,textContent:'',handlers:{},children:[],
-    addEventListener(event,fn){this.handlers[event]=fn;},removeAttribute(){},
+function setup(fetch,confirm=()=>true,hash=''){
+  const elements=new Map(), timers=new Map(), events={};let timer=0;
+  function element(){return {value:'parent',disabled:false,textContent:'',handlers:{},children:[],attributes:{},dataset:{},
+    addEventListener(event,fn){this.handlers[event]=fn;},setAttribute(name,value){this.attributes[name]=value;},
+    removeAttribute(name){delete this.attributes[name];},focus(){},scrollIntoView(){},
     replaceChildren(...items){this.children=items;},append(...items){this.children.push(...items);}};}
   const get=id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);};
   const context={document:{getElementById:get,createElement:element},fetch,AbortController,confirm,
+    location:{hostname:'192.0.2.1',hash},window:{addEventListener(event,fn){events[event]=fn;}},
     setTimeout(fn,ms){timers.set(++timer,{fn,ms});return timer;},clearTimeout(id){timers.delete(id);}};
   const source=fs.readFileSync(path.join(__dirname,'../app/static/app.js'),'utf8');
   vm.runInNewContext(source.replace('refreshSources().catch(e=>toast(e.message));poll();',''),context);
-  return {get,timers,context,click:id=>get(id).handlers.click({preventDefault(){}})};
+  return {get,timers,context,events,click:id=>get(id).handlers.click({preventDefault(){}})};
 }
+
+test('sidebar shows only the selected feature and follows back navigation',()=>{
+  const ui=setup(undefined,undefined,'#sources');
+  for(const page of ['overview','telegram','cloud','sources','jobs','cleanup','media'])
+    assert.equal(ui.get('page-'+page).hidden,page!=='sources');
+  assert.equal(ui.get('nav-sources').attributes['aria-current'],'page');
+  ui.context.location.hash='#media';ui.events.hashchange();
+  assert.equal(ui.get('page-media').hidden,false);
+  assert.equal(ui.get('page-sources').hidden,true);
+  assert.equal(ui.get('nav-sources').attributes['aria-current'],undefined);
+  ui.context.location.hash='#sources';ui.events.hashchange();
+  assert.equal(ui.get('page-sources').hidden,false);
+  ui.context.location.hash='#invalid';ui.events.hashchange();
+  assert.equal(ui.get('page-overview').hidden,false);
+});
+
+test('record shortcuts open the records page as well as its filter',async()=>{
+  const ui=setup();ui.context.refreshJobs=async()=>{};
+  await ui.click('show-cleanup');
+  assert.equal(ui.context.location.hash,'jobs');
+  assert.equal(ui.get('page-jobs').hidden,false);
+  assert.equal(ui.get('page-overview').hidden,true);
+  assert.equal(ui.get('job-filter').value,'cleanup');
+});
+
+test('manual share queues once, refreshes records and reports existing tasks',async()=>{
+  for(const created of [true,false]){
+    const calls=[];
+    const ui=setup(async(url,options)=>{calls.push({url,body:JSON.parse(options.body)});
+      return {ok:true,json:async()=>({created,job_id:42,status:created?'queued':'success'})};});
+    let refreshed=0;ui.context.filterJobs=async value=>{assert.equal(value,'all');refreshed++;};
+    ui.context.refreshState=async()=>{refreshed++;};
+    ui.get('manual-share-link').value=' https://www.guangyapan.com/s/example 提取码：A123 ';
+    await ui.get('manual-share-form').onsubmit({preventDefault(){}});
+    assert.deepEqual(calls,[{url:'/api/jobs/manual',body:{text:'https://www.guangyapan.com/s/example 提取码：A123'}}]);
+    assert.equal(ui.get('manual-share-link').value,'');
+    assert.equal(ui.get('manual-share-submit').disabled,false);
+    assert.equal(refreshed,2);
+    assert.match(ui.get('notice').textContent,created?/已加入转存队列.*#42/:/已有记录 #42.*已完成.*未重复转存/);
+  }
+});
+
+test('manual share preserves input on failure and blocks duplicate submissions in flight',async()=>{
+  let resolve;const calls=[];
+  const ui=setup(url=>{calls.push(url);return new Promise(r=>{resolve=r;});});
+  const input=ui.get('manual-share-link');input.value='https://re0.me/resource/example';
+  const pending=ui.get('manual-share-form').onsubmit({preventDefault(){}});
+  await ui.get('manual-share-form').onsubmit({preventDefault(){}});
+  assert.equal(calls.length,1);assert.equal(ui.get('manual-share-submit').disabled,true);
+  resolve({ok:false,json:async()=>({detail:'不支持中转站链接'})});await pending;
+  assert.equal(input.value,'https://re0.me/resource/example');
+  assert.equal(ui.get('manual-share-submit').disabled,false);
+  assert.match(ui.get('notice').textContent,/不支持中转站/);
+});
+
+test('manual share does not clear another link typed while the request is pending',async()=>{
+  let resolve;
+  const ui=setup(()=>new Promise(r=>{resolve=r;}));
+  ui.context.filterJobs=async()=>{};ui.context.refreshState=async()=>{};
+  const input=ui.get('manual-share-link');input.value='https://www.guangyapan.com/s/first';
+  const pending=ui.get('manual-share-form').onsubmit({preventDefault(){}});
+  input.value='https://www.guangyapan.com/s/second';
+  resolve({ok:true,json:async()=>({created:true,job_id:1,status:'queued'})});await pending;
+  assert.equal(input.value,'https://www.guangyapan.com/s/second');
+});
 test('preview failure is visible in dialog and clears loading state',async()=>{
   const ui=setup(async()=>({ok:false,json:async()=>({detail:'有云端任务正在处理'})}));
   await ui.click('preview-clear');
