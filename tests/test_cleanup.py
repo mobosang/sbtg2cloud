@@ -79,6 +79,41 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         await self.worker.cleanup_due()
         self.cloud.delete_cleanup_targets.assert_awaited_once_with(['owned'])
 
+    async def test_destination_transient_reads_retry_but_never_submit_on_failure(self):
+        self.store.set('auto_cleanup',True)
+        self.enqueue()
+        self.cloud.prepare=AsyncMock(return_value=('access',['source'],'Title',[]))
+        self.cloud.pages=AsyncMock(side_effect=httpx.ReadTimeout('secret-url'))
+        self.cloud.submit=AsyncMock(return_value='task')
+        for expected in ('queued','queued','failed'):
+            await self.worker.process(self.job())
+            self.assertEqual(self.job()['status'],expected)
+            self.assertIn('核对保存目录失败',self.job()['error'])
+            self.assertNotIn('secret',self.job()['error'])
+        self.assertEqual(self.job()['attempts'],3)
+        self.cloud.submit.assert_not_awaited()
+        self.store.update_job(1,status='queued',attempts=0)
+        self.cloud.pages.side_effect=CloudError('光鸭服务繁忙',retryable=True)
+        await self.worker.process(self.job())
+        self.assertEqual(self.job()['status'],'queued')
+        self.cloud.pages.side_effect=None
+        self.cloud.pages.return_value=[]
+        await self.worker.process(self.job())
+        self.cloud.submit.assert_awaited_once_with('access',['source'],'parent')
+
+    async def test_destination_login_and_protocol_failures_keep_specific_reason(self):
+        self.store.set('auto_cleanup',True)
+        self.enqueue()
+        self.cloud.prepare=AsyncMock(return_value=('access',['source'],'Title',[]))
+        self.cloud.submit=AsyncMock()
+        for error in (CloudError('光鸭登录失效，请重新扫码',login=True),CloudError('文件分页返回重复 ID')):
+            self.store.update_job(1,status='queued',attempts=0)
+            self.cloud.pages=AsyncMock(side_effect=error)
+            await self.worker.process(self.job())
+            self.assertEqual(self.job()['status'],'failed')
+            self.assertIn(str(error),self.job()['error'])
+        self.cloud.submit.assert_not_awaited()
+
     async def test_direct_mapping_excludes_existing_and_unrelated_resources(self):
         source={'fileId':'source','fileName':'movie','resType':1,'fileSize':10}
         new={**source,'fileId':'owned'}

@@ -6,6 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
+from typing import Annotated
 
 import httpx
 import qrcode
@@ -383,6 +384,23 @@ class Retry(BaseModel):
     confirm_uncertain: bool = False
 
 
+class BulkDiscard(BaseModel):
+    ids: list[Annotated[int, Field(strict=True, ge=1)]] = Field(min_length=1, max_length=100000)
+
+
+@app.get('/api/jobs/discard-preview')
+async def discard_preview():
+    jobs = app.state.store.discardable_jobs()
+    return {'ids': [job['id'] for job in jobs], 'count': len(jobs),
+            'uncertain': sum(job['status'] == 'uncertain' for job in jobs)}
+
+
+@app.post('/api/jobs/discard-batch')
+async def discard_batch(value: BulkDiscard):
+    count = app.state.store.discard_jobs(value.ids)
+    return {'discarded': count, 'skipped': len(set(value.ids)) - count}
+
+
 @app.post('/api/jobs/{job_id}/discard')
 async def discard(job_id: int):
     store = app.state.store
@@ -392,12 +410,9 @@ async def discard(job_id: int):
     job = rows[0]
     if job['status'] == 'discarded':
         return {'ok': True}
-    if job['status'] not in ('failed', 'uncertain'):
-        raise HTTPException(409, '只可丢弃失败或结果待核对的任务')
-    if job['cleanup_state'] in ('pending', 'deleting', 'submitted', 'uncertain'):
-        raise HTTPException(409, '该任务有关联的清理操作，请先核对清理状态')
     # Preserve share_id and all receipts: discarded links stay globally deduplicated.
-    store.update_job(job_id, status='discarded')
+    if not store.discard_jobs([job_id]):
+        raise HTTPException(409, '只可丢弃失败或待核对且没有进行中清理操作的任务')
     return {'ok': True}
 
 

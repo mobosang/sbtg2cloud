@@ -43,6 +43,8 @@ class Worker:
             return
         attempts = job['attempts'] + 1
         self.store.update_job(jid, status='preparing', attempts=attempts)
+        stage = '读取分享'
+        parent = job['target_id']
         try:
             if job['cleanup_enabled']:
                 access, ids, title, source_rows = await self.cloud.prepare(job['share_id'], job['code'], details=True)
@@ -50,15 +52,8 @@ class Worker:
                 access, ids, title = await self.cloud.prepare(job['share_id'], job['code'])
             if not job['resource_name'] and title:
                 self.store.update_job(jid, resource_name=title)
-        except (CloudError, httpx.HTTPError) as error:
-            retryable = isinstance(error, httpx.HTTPError) or error.retryable
-            self.store.update_job(jid, status='queued' if retryable and attempts < 3 else 'failed',
-                                  next_at=time.time() + 15 * 2 ** attempts,
-                                  error=str(error) if isinstance(error, CloudError) else '网络连接失败')
-            return
-        parent = job['target_id']
-        if job['cleanup_enabled']:
-            try:
+            if job['cleanup_enabled']:
+                stage = '核对保存目录'
                 # Old empty temporary folders are not reused or deleted here.
                 if job['cleanup_folder']:
                     manifest = await self.cloud.cleanup_manifest(parent, job['cleanup_folder'], job['cleanup_name'])
@@ -68,9 +63,18 @@ class Worker:
                 plan = {'before': [file_spec(x) for x in before], 'source': [file_spec(x) for x in source_rows]}
                 self.store.update_job(jid, cleanup_plan=json.dumps(plan, ensure_ascii=False),
                                       cleanup_folder='', cleanup_name='', cleanup_targets='')
-            except Exception:
-                self.store.update_job(jid, status='failed', error='保存目录读取或旧临时目录核对失败，未提交转存；请核对后重试')
-                return
+        except (CloudError, httpx.HTTPError) as error:
+            retryable = isinstance(error, httpx.HTTPError) or error.retryable
+            retry = retryable and attempts < 3
+            reason = str(error) if isinstance(error, CloudError) else '网络连接失败或超时'
+            self.store.update_job(jid, status='queued' if retry else 'failed',
+                                  next_at=time.time() + max(60, 15 * 2 ** attempts),
+                                  error=f'{stage}失败：{reason}；未提交转存' +
+                                        (f'，稍后重试（已尝试 {attempts}/3 次）' if retry else '，请核对后重试'))
+            return
+        except Exception:
+            self.store.update_job(jid, status='failed', error=f'{stage}发生异常，未提交转存；请检查接口或配置后重试')
+            return
         self.store.update_job(jid, status='submitting', error='')
         try:
             task = await self.cloud.submit(access, ids, parent)

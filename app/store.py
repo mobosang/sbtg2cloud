@@ -90,6 +90,19 @@ class Store:
         fields['updated'] = time.time()
         self.execute('UPDATE jobs SET ' + ','.join(f'{k}=?' for k in fields) + ' WHERE id=?', (*fields.values(), job_id))
 
+    def discardable_jobs(self):
+        return self.rows("""SELECT id,status FROM jobs WHERE status IN ('failed','uncertain')
+            AND cleanup_state NOT IN ('pending','deleting','submitted','uncertain') ORDER BY id""")
+
+    def discard_jobs(self, ids):
+        selected = set(ids) & {job['id'] for job in self.discardable_jobs()}
+        now = time.time()
+        # Keep shares and receipts, and recheck eligibility immediately before updating.
+        with self.db:
+            self.db.executemany("UPDATE jobs SET status='discarded',updated=? WHERE id=?",
+                                [(now, jid) for jid in selected])
+        return len(selected)
+
     def enqueue(self, link, source, message_id, resource_name=''):
         default = self.get('target', {'id': '', 'name': '/'})
         target_id = source['target_id'] if source['target_id'] is not None else default['id']

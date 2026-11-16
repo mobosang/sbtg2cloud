@@ -171,6 +171,7 @@ async function refreshJobs(){
   const snapshot=jobsMaxId===null?'':'&max_id='+jobsMaxId;
   const result=await api('/job-pages?page='+jobsPage+'&page_size='+jobsPageSize+'&status_filter='+jobsFilter+snapshot);
   if(request!==jobsRequest)return;
+  $('discard-attention').hidden=jobsFilter!=='attention'||result.total===0;
   jobsPage=result.page;jobsPages=result.pages;
   // First page follows incoming messages; older pages retain their snapshot boundary.
   jobsMaxId=jobsPage===1?null:result.max_id;
@@ -188,6 +189,15 @@ async function filterJobs(value,scroll=false){
 action('show-queued',()=>filterJobs('queued',true));
 action('show-attention',()=>filterJobs('attention',true));
 $('job-filter').onchange=e=>filterJobs(e.target.value).catch(error=>toast(error.message));
+action('discard-attention',async()=>{
+  const preview=await api('/jobs/discard-preview');
+  if(!preview.count){toast('暂无可丢弃任务；有关联清理操作的任务需单独核对');return;}
+  const note=preview.uncertain?'其中 '+preview.uncertain+' 条结果待核对，可能已在云盘转存。':'';
+  if(!confirm('确认丢弃全部 '+preview.count+' 条需要处理的任务（跨全部分页）？保留历史和去重记录，不再重试同一分享，不删除云盘文件。'+note))return;
+  const result=await api('/jobs/discard-batch',{ids:preview.ids});
+  await refreshJobs();await refreshState();
+  toast('已丢弃 '+result.discarded+' 条'+(result.skipped?'，'+result.skipped+' 条状态已变化，已跳过':''));
+});
 action('fill-titles',async()=>{
   const missing=visibleJobs.filter(j=>!j.resource_name&&j.status!=='discarded');
   if(!missing.length){toast('本页资源名称已齐全');return;}

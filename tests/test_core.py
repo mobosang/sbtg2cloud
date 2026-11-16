@@ -259,6 +259,48 @@ class WebTests(unittest.TestCase):
                 main.app.state.cloud.prepare.assert_not_awaited()
                 main.app.state.cloud.delete_cleanup_targets.assert_not_awaited()
 
+    def test_batch_discard_snapshot_guards_idempotence_and_dedup(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):
+            with TestClient(main.app) as client:
+                headers = {'X-Sbtg-Client': 'web'}
+                store = main.app.state.store
+                def seed():
+                    for i in range(1, 128):
+                        store.enqueue({'share_id':str(i),'url':'https://example.com','code':''},
+                                      {'id':1,'target_id':None,'target_name':None},i)
+                        store.update_job(i,status='failed' if i<123 else 'uncertain' if i==123 else 'success' if i==124 else 'queued',
+                                         remote_task='original-receipt' if i==123 else None,error='original error')
+                    store.update_job(122,cleanup_state='submitted')
+                client.portal.call(seed)
+                cloud = main.app.state.cloud
+                cloud.submit = AsyncMock()
+                cloud.prepare = AsyncMock()
+                cloud.delete_cleanup_targets = AsyncMock()
+                preview=client.get('/api/jobs/discard-preview',headers=headers).json()
+                self.assertEqual((preview['count'],preview['uncertain']),(122,1))
+                self.assertEqual(client.get('/api/jobs/discard-preview').status_code,403)
+                client.portal.call(lambda:store.update_job(1,status='success'))
+                client.portal.call(lambda:store.update_job(125,status='failed'))
+                ids=preview['ids']+[122,124,126,127,999,123]
+                result=client.post('/api/jobs/discard-batch',headers=headers,json={'ids':ids}).json()
+                self.assertEqual(result,{'discarded':121,'skipped':6})
+                self.assertEqual(client.post('/api/jobs/discard-batch',headers=headers,json={'ids':ids}).json()['discarded'],0)
+                all_jobs=client.get('/api/job-pages?page_size=100',headers=headers).json()
+                self.assertEqual(all_jobs['total'],127)
+                job=next(x for x in all_jobs['items'] if x['id']==123)
+                self.assertEqual((job['status'],job['remote_task'],job['error']),('discarded','original-receipt','original error'))
+                attention=client.get('/api/job-pages?status_filter=attention',headers=headers).json()
+                self.assertEqual({x['id'] for x in attention['items']},{122,125})
+                client.portal.call(store.enqueue,{'share_id':'123','url':'https://example.com','code':''},
+                                   {'id':1,'target_id':None,'target_name':None},999)
+                self.assertEqual(client.get('/api/job-pages',headers=headers).json()['total'],127)
+                for invalid in ([],[0],[-1],['1'],[True]):
+                    self.assertEqual(client.post('/api/jobs/discard-batch',headers=headers,json={'ids':invalid}).status_code,422)
+                cloud.submit.assert_not_awaited()
+                cloud.prepare.assert_not_awaited()
+                cloud.delete_cleanup_targets.assert_not_awaited()
+
     def test_job_pagination_sizes_boundaries_and_snapshot(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):
