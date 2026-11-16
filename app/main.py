@@ -154,6 +154,18 @@ async def save_media_settings(value: MediaSettings, request: Request):
     return {'ok': True}
 
 
+@app.get('/api/media/cache')
+async def media_cache(page: int = Query(1, ge=1)):
+    return app.state.store.media_cache_page(page)
+
+
+@app.post('/api/media/cache/clear')
+async def clear_media_cache():
+    async with app.state.media.cache_lock:
+        count = app.state.store.execute('DELETE FROM media_links').rowcount
+        return {'cleared': count}
+
+
 class CleanupSettings(BaseModel):
     enabled: bool
 

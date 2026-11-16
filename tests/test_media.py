@@ -48,7 +48,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(self.tmp.name)
         self.store.set('media_proxy', CONFIG)
-        self.store.set('cloud_token', {'access_token': 'cloud-test', 'refresh_token': 'refresh-test',
+        self.store.save_cloud_token({'access_token': 'cloud-test', 'refresh_token': 'refresh-test',
                                       'expires_at': time.time() + 3600})
         self.cloud = Cloud(self.store)
         self.media = MediaProxy(self.store, self.cloud)
@@ -77,7 +77,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
     def upstream(self, request):
         self.requests.append(request)
         if request.url.path.endswith('/PlaybackInfo'):
-            if request.headers.get('x-emby-token') != 'emby-test' and request.url.params.get('api_key') != 'emby-test':
+            if request.headers.get('x-emby-token') not in ('emby-test', 'other-authorized-user') and request.url.params.get('api_key') != 'emby-test':
                 return httpx.Response(401)
             return httpx.Response(200, json={'MediaSources': [{'Id': 'source', 'Path': PATH}]})
         return httpx.Response(206, headers={'Content-Range': 'bytes 100-103/1000', 'Accept-Ranges': 'bytes',
@@ -153,13 +153,13 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.status_code for r in responses], [302] * 4)
         self.cloud.download_url.assert_awaited_once()
         self.assertEqual(len(self.requests), 4)
-        self.media.links['/Media/影片/视频.mkv'] = (0, 'expired')
+        self.store.execute('UPDATE media_links SET expires_at=0')
         self.assertEqual((await self.client.get('/Videos/123/original.mkv', headers=self.auth)).status_code, 302)
         self.assertEqual(self.cloud.download_url.await_count, 2)
         self.assertEqual(self.cloud.pages.await_count, 3)
 
     async def test_missing_cached_child_refreshes_only_its_parent(self):
-        self.media.cache_owner = 'refresh-test'
+        self.media.cache_owner = self.store.get('cloud_cache_owner')
         self.media.directories['movie'] = (time.monotonic() + 300, [])
         r = await self.client.get('/Videos/123/original.mkv', headers=self.auth)
         self.assertEqual(r.status_code, 302)
@@ -167,11 +167,78 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_account_change_invalidates_all_download_and_directory_caches(self):
         await self.client.get('/Videos/123/original.mkv', headers=self.auth)
-        self.store.set('cloud_token', {'access_token': 'other', 'refresh_token': 'other-refresh',
-                                      'expires_at': time.time() + 3600})
+        self.store.save_cloud_token({'access_token': 'other', 'refresh_token': 'other-refresh',
+                                      'expires_at': time.time() + 3600}, new_session=True)
         self.assertEqual((await self.client.get('/Videos/123/original.mkv', headers=self.auth)).status_code, 302)
         self.assertEqual(self.cloud.download_url.await_count, 2)
         self.assertEqual(self.cloud.pages.await_count, 6)
+
+    async def test_multiple_authorized_users_share_one_link_but_authorization_is_not_cached(self):
+        uri = '/Videos/123/original.mkv'
+        first = await self.client.get(uri, headers=self.auth)
+        second = await self.client.get(uri, headers={'X-Emby-Token': 'other-authorized-user'})
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(first.headers['location'], second.headers['location'])
+        self.assertEqual(len(self.requests), 2)
+        self.cloud.download_url.assert_awaited_once()
+        page = self.store.media_cache_page(1)
+        self.assertEqual(page['items'][0]['hits'], 1)
+        self.assertNotIn('emby-test', str(page))
+        self.assertNotIn('temporary-test', str(page))
+        self.assertEqual((await self.client.get(uri, headers={'X-Emby-Token': 'revoked'})).status_code, 401)
+
+    async def test_persistent_cache_is_reused_after_store_and_proxy_restart(self):
+        await self.media.signed_url('/Media/影片/视频.mkv')
+        self.store.db.close()
+        self.store = Store(self.tmp.name)
+        self.cloud.store = self.store
+        restarted = MediaProxy(self.store, self.cloud)
+        try:
+            self.assertEqual(await restarted.signed_url('/Media/影片/视频.mkv'), LINK)
+            self.cloud.download_url.assert_awaited_once()
+            self.assertEqual(self.cloud.pages.await_count, 3)
+            self.assertEqual(self.store.media_cache_page(1)['items'][0]['hits'], 1)
+        finally:
+            await restarted.close()
+
+    async def test_cache_retention_is_24_hours_but_reuse_never_exceeds_provider_expiry(self):
+        for duration, expected in [(172800, 96400), (3600, 13595), (0, 10000)]:
+            self.store.execute('DELETE FROM media_links')
+            self.cloud.download_url.return_value = (LINK, duration)
+            with patch('app.media.time.time', return_value=10000):
+                await self.media.signed_url('/Media/影片/视频.mkv')
+                row = self.store.media_cache_page(1)['items'][0]
+                self.assertEqual(row['retained_until'], 96400)
+                self.assertEqual(row['expires_at'], expected)
+
+    async def test_token_refresh_preserves_links_and_new_qr_login_clears_them(self):
+        await self.media.signed_url('/Media/影片/视频.mkv')
+        owner = self.store.get('cloud_cache_owner')
+        self.cloud.save_token({'access_token': 'refreshed', 'refresh_token': 'rotated', 'expires_in': 3600})
+        self.assertEqual(self.store.get('cloud_cache_owner'), owner)
+        await self.media.signed_url('/Media/影片/视频.mkv')
+        self.cloud.download_url.assert_awaited_once()
+        self.cloud.raw = AsyncMock(return_value={'access_token': 'new-login', 'refresh_token': 'new-session', 'expires_in': 3600})
+        self.assertEqual(await self.cloud.poll_qr('test-device'), 'authorized')
+        self.assertNotEqual(self.store.get('cloud_cache_owner'), owner)
+        self.assertEqual(self.store.rows('SELECT COUNT(*) n FROM media_links')[0]['n'], 0)
+
+    async def test_account_switch_during_lookup_does_not_store_the_old_accounts_url(self):
+        async def switched(file_id):
+            self.cloud.save_token({'access_token': 'new-login', 'refresh_token': 'new-session'}, new_session=True)
+            return LINK, 3600
+        self.cloud.download_url.side_effect = switched
+        r = await self.client.get('/Videos/123/original.mkv', headers=self.auth)
+        self.assertEqual(r.status_code, 502)
+        self.assertIn('会话已切换', r.json()['detail'])
+        self.assertEqual(self.store.rows('SELECT COUNT(*) n FROM media_links')[0]['n'], 0)
+
+    async def test_records_older_than_24_hours_are_pruned_locally(self):
+        owner = self.store.get('cloud_cache_owner')
+        self.store.save_media_link(owner, '/old/video.mkv', 'old', LINK, time.time() - 86401, time.time() + 3600)
+        self.assertIsNone(self.store.media_link(owner, '/old/video.mkv', time.time()))
+        self.assertEqual(self.store.media_cache_page(1)['total'], 0)
+        self.cloud.download_url.assert_not_awaited()
 
     async def test_lookup_failure_does_not_silently_stream_through_the_nas(self):
         self.cloud.pages.return_value = []
@@ -275,6 +342,35 @@ class CloudDownloadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MediaWebTests(unittest.TestCase):
+    def test_cache_api_paginates_and_clears_locally_without_returning_credentials(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)), patch.dict('os.environ', {}, clear=True):
+            with TestClient(main.app) as client:
+                headers = {'X-Sbtg-Client': 'web'}
+                store = main.app.state.store
+                def seed():
+                    store.save_cloud_token({'access_token': 'test-only', 'refresh_token': 'refresh-only',
+                                            'expires_at': time.time() + 3600})
+                    owner, now = store.get('cloud_cache_owner'), time.time()
+                    for i in range(21):
+                        store.save_media_link(owner, f'/Media/{i}.mkv', str(i), LINK, now,
+                                              now + 3600 if i else now - 1)
+                client.portal.call(seed)
+                self.assertEqual(client.get('/api/media/cache').status_code, 403)
+                first = client.get('/api/media/cache', headers=headers)
+                self.assertEqual((first.json()['total'], first.json()['valid'], first.json()['pages']), (21, 20, 2))
+                self.assertEqual(len(first.json()['items']), 20)
+                self.assertNotIn('temporary-test', first.text)
+                self.assertNotIn('refresh-only', first.text)
+                second = client.get('/api/media/cache?page=2', headers=headers).json()
+                self.assertEqual(len(second['items']), 1)
+                self.assertEqual(second['items'][0]['usable'], 0)
+                with patch.object(main.app.state.cloud, 'raw', new_callable=AsyncMock) as raw:
+                    result = client.post('/api/media/cache/clear', headers=headers, json={})
+                    self.assertEqual(result.json(), {'cleared': 21})
+                    self.assertEqual(client.get('/api/media/cache', headers=headers).json()['total'], 0)
+                    raw.assert_not_awaited()
+
     def test_settings_require_management_guard_persist_and_reject_proxy_loops(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)), patch.dict('os.environ', {}, clear=True):

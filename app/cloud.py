@@ -91,10 +91,10 @@ class Cloud:
         except ValueError:
             raise CloudError('光鸭返回非 JSON 响应，接口可能已变化') from None
 
-    def save_token(self, data):
+    def save_token(self, data, new_session=False):
         if not data.get('access_token') or not data.get('refresh_token'):
             raise CloudError('扫码授权返回缺少令牌')
-        self.store.set('cloud_token', {**data, 'expires_at': time.time() + int(data.get('expires_in', 3600))})
+        self.store.save_cloud_token({**data, 'expires_at': time.time() + int(data.get('expires_in', 3600))}, new_session)
         self.login_error = ''
 
     async def token(self, force=False):
@@ -132,7 +132,7 @@ class Cloud:
         if body.get('error') in ('authorization_pending', 'slow_down'):
             return body['error']
         check(body)
-        self.save_token(body)
+        self.save_token(body, new_session=True)
         return 'authorized'
 
     async def pages(self, path, payload, cursor_mode=False):

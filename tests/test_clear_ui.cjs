@@ -170,3 +170,38 @@ test('cleanup resource cards show safe names, real stages and empty states',()=>
   ui.context.cleanupResource('cleanup-last',{id:8,share_id:'share',phase:'legacy_done'},'空');
   assert.match(ui.get('cleanup-last').children[1].textContent,/历史完成时间未记录/);
 });
+
+test('cache list shows safe names, expiry, hit counts and pagination without exposing URLs',async()=>{
+  const calls=[];
+  const entry={path:'/Media/<video>.mkv',created:100,expires_at:200,retained_until:86500,last_used:150,hits:7,usable:true};
+  const ui=setup(async url=>{
+    calls.push(url);const page=url.includes('page=2')?2:1;
+    return {ok:true,json:async()=>({page,pages:2,page_size:20,total:21,valid:20,retention_hours:24,
+      items:[{...entry,usable:page===1}]})};
+  });
+  await ui.context.refreshMediaCache();
+  assert.match(ui.get('media-cache-summary').textContent,/24.*21.*20.*1/);
+  const row=ui.get('media-cache-items').children[0];
+  assert.equal(row.children[0].children[0].textContent,'<video>.mkv');
+  assert.equal(row.children[3].textContent,'7');
+  assert.equal(ui.get('media-cache-prev').disabled,true);
+  await ui.get('media-cache-next').onclick();
+  assert.equal(ui.get('media-cache-next').disabled,true);
+  assert.match(ui.get('media-cache-items').children[0].children[2].children[0].textContent,/已过期.*下次播放刷新/);
+  assert.equal(calls.length,2);
+});
+
+test('clear cache requires confirmation and then refreshes the local list',async()=>{
+  const calls=[];
+  const ui=setup(async url=>{
+    calls.push(url);return {ok:true,json:async()=>url.endsWith('/clear')?{cleared:2}:
+      {page:1,pages:1,page_size:20,total:0,valid:0,retention_hours:24,items:[]}};
+  });
+  await ui.click('clear-media-cache');
+  assert.deepEqual(calls,['/api/media/cache/clear','/api/media/cache?page=1']);
+  assert.match(ui.get('notice').textContent,/2.*直链缓存/);
+  assert.match(ui.get('media-cache-items').children[0].children[0].textContent,/暂无缓存/);
+  const cancelled=[];
+  const other=setup(async url=>{cancelled.push(url);},()=>false);
+  await other.click('clear-media-cache');assert.deepEqual(cancelled,[]);
+});

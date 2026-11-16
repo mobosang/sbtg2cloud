@@ -1,4 +1,5 @@
 import json
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -12,6 +13,11 @@ class Store:
         self.db.executescript('''
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS media_links (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,owner TEXT NOT NULL,path TEXT NOT NULL,
+          file_id TEXT NOT NULL,url TEXT NOT NULL,created REAL NOT NULL,expires_at REAL NOT NULL,
+          retained_until REAL NOT NULL,hits INTEGER NOT NULL DEFAULT 0,last_used REAL NOT NULL,
+          UNIQUE(owner,path));
         CREATE TABLE IF NOT EXISTS directory_clears (
           id TEXT PRIMARY KEY,parent_id TEXT NOT NULL,parent_name TEXT NOT NULL,
           items TEXT NOT NULL,state TEXT NOT NULL,created REAL NOT NULL,error TEXT NOT NULL DEFAULT '');
@@ -56,6 +62,9 @@ class Store:
         self.db.execute("UPDATE jobs SET status='queued' WHERE status='preparing'")
         self.db.execute("UPDATE directory_clears SET state='uncertain',error='删除提交中断，请核对回收站；不会重发' WHERE id IN (SELECT clear_id FROM directory_clear_parts WHERE state='deleting')")
         self.db.execute("UPDATE directory_clear_parts SET state='uncertain' WHERE state='deleting'")
+        if self.get('cloud_token') and not self.get('cloud_cache_owner'):
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                            ('cloud_cache_owner', json.dumps(secrets.token_hex(16))))
         self.db.commit()
 
     def get(self, key, default=None):
@@ -73,6 +82,46 @@ class Store:
     def set(self, key, value):
         self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (key, json.dumps(value)))
         self.db.commit()
+
+    def save_cloud_token(self, value, new_session=False):
+        # Rotate cache ownership atomically with QR login, but preserve it during token refresh.
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('cloud_token', json.dumps(value)))
+            if new_session or not self.get('cloud_cache_owner'):
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                                ('cloud_cache_owner', json.dumps(secrets.token_hex(16))))
+            if new_session:
+                self.db.execute('DELETE FROM media_links')
+
+    def media_link(self, owner, path, now):
+        rows = self.rows('''SELECT id,url FROM media_links
+            WHERE owner=? AND path=? AND expires_at>? AND retained_until>?''', (owner, path, now, now))
+        if not rows:
+            return None
+        self.execute('UPDATE media_links SET hits=hits+1,last_used=? WHERE id=?', (now, rows[0]['id']))
+        return rows[0]['url']
+
+    def save_media_link(self, owner, path, file_id, url, created, expires_at):
+        with self.db:
+            self.db.execute('DELETE FROM media_links WHERE retained_until<=?', (created,))
+            self.db.execute('''INSERT INTO media_links(owner,path,file_id,url,created,expires_at,retained_until,last_used)
+                VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(owner,path) DO UPDATE SET
+                file_id=excluded.file_id,url=excluded.url,created=excluded.created,expires_at=excluded.expires_at,
+                retained_until=excluded.retained_until,hits=0,last_used=excluded.last_used''',
+                (owner, path, file_id, url, created, expires_at, created + 86400, created))
+
+    def media_cache_page(self, page, page_size=20):
+        now, owner = time.time(), self.get('cloud_cache_owner', '')
+        self.execute('DELETE FROM media_links WHERE retained_until<=?', (now,))
+        stats = self.rows('''SELECT COUNT(*) total,COALESCE(SUM(expires_at>?),0) valid
+            FROM media_links WHERE owner=?''', (now, owner))[0]
+        pages = max(1, (stats['total'] + page_size - 1) // page_size)
+        page = min(page, pages)
+        # Never return the signed URL or cache ownership key through the management API.
+        items = self.rows('''SELECT id,path,created,expires_at,retained_until,hits,last_used,
+            expires_at>? AS usable FROM media_links WHERE owner=? ORDER BY last_used DESC,id DESC LIMIT ? OFFSET ?''',
+            (now, owner, page_size, (page - 1) * page_size))
+        return {**stats, 'items': items, 'page': page, 'pages': pages, 'page_size': page_size, 'retention_hours': 24}
 
     def rows(self, sql, params=()):
         return [dict(x) for x in self.db.execute(sql, params).fetchall()]

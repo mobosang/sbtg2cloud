@@ -94,7 +94,7 @@ class MediaProxy:
             Route('/{path:path}', self.handle, methods=['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']),
             WebSocketRoute('/{path:path}', self.websocket)])
         self.cache_lock = asyncio.Lock()
-        self.directories, self.links = {}, {}
+        self.directories = {}
         self.cache_owner = None
         self.server = self.server_task = self.listener = None
         self.error, self.last, self.redirects = '', None, 0
@@ -193,19 +193,24 @@ class MediaProxy:
         # Coalesce concurrent seeks/clients; directory reads retain the shared Guangya pacing.
         async with self.cache_lock:
             await self.cloud.token()
-            owner = self.store.get('cloud_token', {}).get('refresh_token')
+            owner = self.store.get('cloud_cache_owner')
+            if not owner:
+                self.store.save_cloud_token(self.store.get('cloud_token'))
+                owner = self.store.get('cloud_cache_owner')
             if owner != self.cache_owner:
                 self.directories.clear()
-                self.links.clear()
                 self.cache_owner = owner
-            cached = self.links.get(path)
-            if cached and cached[0] > time.monotonic():
-                return cached[1]
+            cached = self.store.media_link(owner, path, time.time())
+            if cached:
+                return cached
             fid = await self.resolve(path)
+            started = time.time()
             url, duration = await self.cloud.download_url(fid)
-            if len(self.links) >= 256:
-                self.links.pop(next(iter(self.links)))
-            self.links[path] = (time.monotonic() + min(60, max(0, duration - 5)), url)
+            if owner != self.store.get('cloud_cache_owner'):
+                raise CloudError('光鸭登录会话已切换，请重新播放')
+            created = time.time()
+            self.store.save_media_link(owner, path, fid, url, created,
+                                       min(created + 86400, started + max(0, duration - 5)))
             return url
 
     async def redirect(self, request, settings, match):

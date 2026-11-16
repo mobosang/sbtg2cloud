@@ -5,6 +5,7 @@ const jobStates = {queued:'排队中',preparing:'读取分享',submitting:'正�
 const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',submitted:'云端删除中',done:'已移入回收站',blocked:'清理已停止，需核对',uncertain:'删除结果待核对'};
 let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false;
 let mediaDirty=false;
+let mediaCachePage=1, mediaCachePages=1, mediaCacheRequest=0;
 function text(tag, value, cls) { const e=document.createElement(tag); e.textContent=value; if(cls)e.className=cls; return e; }
 function toast(message) { $('notice').textContent=message; $('notice').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('notice').hidden=true,7000); }
 async function api(path, body, signal) {
@@ -85,6 +86,38 @@ $('media-form').onsubmit=async e=>{
     mediaDirty=false;await refreshState();toast('播放配置已保存；客户端连接播放入口后生效');
   }catch(error){toast(error.message);}finally{button.disabled=false;}
 };
+async function refreshMediaCache(){
+  const request=++mediaCacheRequest;
+  const data=await api('/media/cache?page='+mediaCachePage);
+  if(request!==mediaCacheRequest)return;
+  mediaCachePage=data.page;mediaCachePages=data.pages;
+  $('media-cache-summary').textContent='保存 '+data.retention_hours+' 小时 · 共 '+data.total+' 条，有效 '+data.valid+' 条，待刷新 '+(data.total-data.valid)+' 条。';
+  $('media-cache-page').textContent='第 '+data.page+' / '+data.pages+' 页 · 每页 '+data.page_size+' 条';
+  $('media-cache-prev').disabled=data.page<=1;$('media-cache-next').disabled=data.page>=data.pages;
+  const list=$('media-cache-items');list.replaceChildren();
+  for(const entry of data.items){
+    const row=text('tr',''),name=text('td',''),expiry=text('td','');
+    name.append(text('strong',entry.path.split('/').at(-1)),text('small',entry.path));
+    expiry.append(text('span',entry.usable?new Date(entry.expires_at*1000).toLocaleString():'已过期，下次播放刷新'),
+      text('small','记录保留至：'+new Date(entry.retained_until*1000).toLocaleString()));
+    row.append(name,text('td',new Date(entry.created*1000).toLocaleString()),expiry,text('td',String(entry.hits)),
+      text('td',new Date(entry.last_used*1000).toLocaleString()));
+    list.append(row);
+  }
+  if(!data.items.length){const row=text('tr',''),cell=text('td','暂无缓存；下一次光鸭播放成功取链后会自动保存。','hint');cell.colSpan=5;row.append(cell);list.append(row);}
+}
+action('refresh-media-cache',()=>refreshMediaCache());
+action('clear-media-cache',async()=>{
+  if(!confirm('清空直链缓存？不会删除云盘文件；之后播放需重新取链，已开始的 CDN 连接不受此操作影响。'))return;
+  const result=await api('/media/cache/clear',{});mediaCachePage=1;await refreshMediaCache();toast('已移除 '+result.cleared+' 条直链缓存');
+});
+async function navigateMediaCache(page){
+  if(page<1||page>mediaCachePages)return;
+  mediaCachePage=page;
+  try{await refreshMediaCache();}catch(error){toast(error.message);}
+}
+$('media-cache-prev').onclick=()=>navigateMediaCache(mediaCachePage-1);
+$('media-cache-next').onclick=()=>navigateMediaCache(mediaCachePage+1);
 $('tg-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.target;try{await api('/telegram/config',{api_id:Number(f.api_id.value),api_hash:f.api_hash.value});f.api_hash.value='';toast('应用凭据已保存，可以扫码登录');await refreshState();}catch(error){toast(error.message);}});
 $('password-form').addEventListener('submit',async e=>{e.preventDefault();const input=e.target.password,password=input.value;input.value='';try{await api('/telegram/password',{password});await refreshState();}catch(error){toast(error.message);}});
 action('tg-qr',async()=>{await api('/telegram/qr',{});await refreshState();});
@@ -277,5 +310,5 @@ $('previous-jobs').onclick=()=>navigateJobs(jobsPage-1);
 $('next-jobs').onclick=()=>navigateJobs(jobsPage+1);
 $('page-size').onchange=async e=>{jobsPageSize=Number(e.target.value);jobsPage=1;jobsMaxId=null;try{await refreshJobs();}catch(error){toast(error.message);}};
 $('jump-page').onsubmit=e=>{e.preventDefault();navigateJobs(Number($('page-number').value));};
-async function poll(){try{await refreshState();await refreshJobs();}catch(error){toast('管理服务连接异常：'+error.message);}setTimeout(poll,4000);}
+async function poll(){try{await refreshState();await refreshJobs();await refreshMediaCache();}catch(error){toast('管理服务连接异常：'+error.message);}setTimeout(poll,4000);}
 refreshSources().catch(e=>toast(e.message));poll();
