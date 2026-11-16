@@ -167,7 +167,8 @@ class Cloud:
                 if not cursor or cursor in cursors or not rows:
                     raise CloudError('分页游标异常，已停止以避免漏转存')
                 cursors.add(cursor)
-            elif len(rows) < 100:
+            # A full final page is followed by {"total": N} without a list field.
+            elif len(rows) < 100 or (isinstance(data.get('total'), int) and len(items) == data['total']):
                 return items
         raise CloudError('文件列表超过分页上限')
 

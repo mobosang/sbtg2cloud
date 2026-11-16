@@ -341,6 +341,29 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.cloud.cleanup_manifest.assert_not_awaited()
         self.cloud.delete_cleanup_folder.assert_not_awaited()
 
+    async def test_directory_pagination_stops_at_total_including_full_final_page(self):
+        for count in (100,200,201):
+            with self.subTest(count=count):
+                rows=[{'fileId':str(i),'fileName':str(i),'resType':1} for i in range(count)]
+                pages=[{'total':count,'list':rows[i:i+100]} for i in range(0,count,100)]
+                self.cloud.call=AsyncMock(side_effect=pages+[{'total':count}])
+                self.assertEqual(await self.cloud.pages('/file/get_file_list',{'parentId':'parent'}),rows)
+                self.assertEqual(self.cloud.call.await_count,len(pages))
+                self.assertEqual([call.args[1]['page'] for call in self.cloud.call.call_args_list],list(range(len(pages))))
+
+    async def test_full_destination_page_does_not_prevent_transfer(self):
+        self.store.set('auto_cleanup',True)
+        self.enqueue()
+        self.cloud.prepare=AsyncMock(return_value=('access',['source'],'Title',
+                                      [{'fileId':'source','fileName':'movie','resType':2}]))
+        rows=[{'fileId':str(i),'fileName':str(i),'resType':2} for i in range(100)]
+        self.cloud.call=AsyncMock(side_effect=[{'total':100,'list':rows},{'total':100}])
+        self.cloud.submit=AsyncMock(return_value='task')
+        await self.worker.process(self.job())
+        self.assertEqual(self.job()['status'],'submitted')
+        self.cloud.call.assert_awaited_once()
+        self.cloud.submit.assert_awaited_once_with('access',['source'],'parent')
+
     async def test_empty_directory_protocol_and_unknown_schema(self):
         for body in ({}, {'total':0}, {'total':0,'list':None}, {'list':None}, {'files':None}, {'list':[]}):
             self.cloud.call=AsyncMock(return_value=body)
