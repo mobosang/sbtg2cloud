@@ -23,7 +23,8 @@ class DirectoryClear:
             except (ValueError, KeyError, TypeError):
                 continue
             if ids and '' not in ids and ids <= completed.get(job['target_id'], set()):
-                self.store.update_job(job['id'], cleanup_state='done', cleanup_error='已通过一键清空移入回收站')
+                self.store.update_job(job['id'], cleanup_state='done', cleanup_error='已通过一键清空移入回收站',
+                                      cleanup_completed_at=time.time())
 
     def targets(self):
         default = self.store.get('target', {'id': '', 'name': '/'})

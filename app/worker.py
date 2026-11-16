@@ -10,6 +10,7 @@ from .directory_clear import DirectoryClear
 class Worker:
     def __init__(self, store, cloud):
         self.store, self.cloud = store, cloud
+        self.current_cleanup_id = None
         self.directory_clear = DirectoryClear(store, cloud)
         resume_reduced_cleanup(store)
 
@@ -89,7 +90,7 @@ class Worker:
         if job['cleanup_state'] == 'submitted':
             try:
                 if await self.cloud.task(job['cleanup_task']):
-                    self.store.update_job(jid, cleanup_state='done', cleanup_error='')
+                    self.store.update_job(jid, cleanup_state='done', cleanup_error='', cleanup_completed_at=time.time())
                 else:
                     self.store.update_job(jid, cleanup_next=time.time() + 60)
             except TaskFailed:
@@ -155,7 +156,11 @@ class Worker:
             (time.time(), time.time() - self.store.get('cleanup_minutes', 60)*60,
              time.time() - self.store.get('cleanup_minutes', 60)*60, bool(self.store.get('auto_cleanup', False))))
         if jobs:
-            await self.cleanup(jobs[0])
+            self.current_cleanup_id = jobs[0]['id']
+            try:
+                await self.cleanup(jobs[0])
+            finally:
+                self.current_cleanup_id = None
 
     async def run(self):
         last_cleanup_check = None

@@ -192,6 +192,43 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.job()['status'], 'success')
         self.cloud.delete_cleanup_folder.assert_awaited_once_with('own-folder')
 
+    async def test_cleanup_progress_tracks_preflight_submission_and_confirmed_completion(self):
+        self.due()
+        async def checking(*args):
+            progress=self.store.cleanup_progress(self.worker.current_cleanup_id)
+            self.assertEqual(progress['current']['phase'],'checking')
+            self.assertIsNone(progress['last'])
+            self.assertIsNone(progress['next'])
+            return '[]'
+        async def deleting(*args):
+            self.assertEqual(self.store.cleanup_progress(self.worker.current_cleanup_id)['current']['phase'],'deleting')
+            return 'receipt'
+        self.cloud.cleanup_manifest.side_effect=checking
+        self.cloud.delete_cleanup_folder.side_effect=deleting
+        await self.worker.cleanup_due()
+        self.assertIsNone(self.worker.current_cleanup_id)
+        self.assertIsNone(self.job()['cleanup_completed_at'])
+        self.assertEqual(self.store.cleanup_progress()['current']['phase'],'submitted')
+        self.store.update_job(1,cleanup_next=0)
+        async def polling(*args):
+            self.assertEqual(self.store.cleanup_progress(self.worker.current_cleanup_id)['current']['phase'],'polling')
+            return True
+        self.cloud.task=AsyncMock(side_effect=polling)
+        await self.worker.cleanup_due()
+        self.assertIsNotNone(self.job()['cleanup_completed_at'])
+        self.assertIsNone(self.worker.current_cleanup_id)
+        self.assertEqual(self.store.cleanup_progress()['last']['id'],1)
+        self.assertIsNone(self.store.cleanup_progress()['current'])
+
+    async def test_cancelled_cleanup_does_not_leave_stale_current_resource(self):
+        self.due()
+        self.cloud.cleanup_manifest.side_effect=asyncio.CancelledError()
+        with self.assertRaises(asyncio.CancelledError):
+            await self.worker.cleanup_due()
+        self.assertIsNone(self.worker.current_cleanup_id)
+        self.assertEqual(self.job()['cleanup_state'],'pending')
+        self.cloud.delete_cleanup_folder.assert_not_awaited()
+
     async def test_pause_blocks_due_delete_and_resume_uses_original_time(self):
         self.due()
         self.store.set('auto_cleanup', False)

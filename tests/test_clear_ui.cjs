@@ -7,7 +7,7 @@ function setup(fetch,confirm=()=>true){
   const elements=new Map(), timers=new Map();let timer=0;
   function element(){return {value:'parent',disabled:false,textContent:'',handlers:{},children:[],
     addEventListener(event,fn){this.handlers[event]=fn;},removeAttribute(){},
-    replaceChildren(...items){this.children=items;},append(item){this.children.push(item);}};}
+    replaceChildren(...items){this.children=items;},append(...items){this.children.push(...items);}};}
   const get=id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);};
   const context={document:{getElementById:get,createElement:element},fetch,AbortController,confirm,
     setTimeout(fn,ms){timers.set(++timer,{fn,ms});return timer;},clearTimeout(id){timers.delete(id);}};
@@ -104,7 +104,7 @@ test('confirmed uncertain bulk retry passes explicit permission',async()=>{
 test('interval form saves seconds and polling preserves unsaved input',async()=>{
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
     target:{name:'/Media'},auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
-    cleanup_queue:{pending:75,submitted:1},directory_clear:null,counts:{}};
+    cleanup_queue:{pending:75,submitted:1},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{}};
   const calls=[];
   const ui=setup(async(url,options)=>{
     calls.push({url,body:options.body});
@@ -127,4 +127,19 @@ test('cleanup shortcut opens the full cleanup filter',async()=>{
   ui.context.filterJobs=async(value,scroll)=>{selected={value,scroll};};
   await ui.click('show-cleanup');
   assert.deepEqual(selected,{value:'cleanup',scroll:true});
+});
+test('cleanup resource cards show safe names, real stages and empty states',()=>{
+  const ui=setup();
+  for(const [phase,label] of [['checking','正在核对目录内容'],['deleting','正在提交删除'],
+                            ['submitted','云端删除中'],['polling','正在查询'],['queued','已到期'],['paused','已暂停']]){
+    ui.context.cleanupResource('cleanup-current',{id:7,resource_name:'<img src=x onerror=alert(1)>',phase},'空');
+    const children=ui.get('cleanup-current').children;
+    assert.equal(children[0].textContent,'#7 <img src=x onerror=alert(1)>');
+    assert.ok(children[1].textContent.includes(label));
+  }
+  ui.context.cleanupResource('cleanup-current',null,'当前没有正在处理的清理任务');
+  assert.equal(ui.get('cleanup-current').children.length,1);
+  assert.match(ui.get('cleanup-current').children[0].textContent,/没有正在处理/);
+  ui.context.cleanupResource('cleanup-last',{id:8,share_id:'share',phase:'legacy_done'},'空');
+  assert.match(ui.get('cleanup-last').children[1].textContent,/历史完成时间未记录/);
 });

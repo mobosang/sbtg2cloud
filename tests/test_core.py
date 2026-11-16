@@ -54,6 +54,39 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]['target_id'], 'folder1')
 
+    def test_cleanup_progress_distinguishes_receipts_preflight_and_next_eligible(self):
+        self.assertEqual(self.store.cleanup_progress(),{'last':None,'current':None,'next':None})
+        self.store.set('auto_cleanup',True)
+        self.store.set('cleanup_minutes',5)
+        for i in range(1,8):
+            self.store.enqueue({'share_id':str(i),'url':'https://example.com','code':''},self.source,i,'Resource '+str(i))
+            self.store.update_job(i,status='success',completed_at=50+i,cleanup_enabled=1,cleanup_state='pending')
+        self.store.update_job(1,cleanup_state='done',cleanup_completed_at=80)
+        self.store.update_job(2,cleanup_state='done',cleanup_completed_at=90)
+        self.store.update_job(3,cleanup_state='done')
+        self.store.execute('UPDATE jobs SET updated=99999 WHERE id IN (1,3)')
+        self.store.update_job(5,cleanup_state='submitted',cleanup_task='receipt')
+        self.store.update_job(6,cleanup_next=2000)
+        with patch('app.store.time.time',return_value=1000):
+            progress=self.store.cleanup_progress(4)
+            self.assertEqual(progress['last']['id'],2)
+            self.assertEqual((progress['current']['id'],progress['current']['phase']),(4,'checking'))
+            self.assertEqual((progress['next']['id'],progress['next']['phase']),(7,'queued'))
+            progress=self.store.cleanup_progress()
+            self.assertEqual((progress['current']['id'],progress['current']['phase']),(5,'submitted'))
+            self.assertEqual(progress['next']['id'],4)
+            self.assertEqual(self.store.cleanup_progress(5)['current']['phase'],'polling')
+            self.store.update_job(4,cleanup_state='blocked')
+            self.store.update_job(7,completed_at=1200,cleanup_next=1100)
+            progress=self.store.cleanup_progress()
+            self.assertEqual((progress['next']['id'],progress['next']['phase'],progress['next']['available_at']),
+                             (7,'waiting',1500))
+            self.store.update_job(7,cleanup_state='blocked')
+            self.assertEqual(self.store.cleanup_progress()['next']['phase'],'backoff')
+            self.store.set('auto_cleanup',False)
+            self.assertEqual(self.store.cleanup_progress()['next']['phase'],'paused')
+            self.assertNotIn('cleanup_task',self.store.cleanup_progress()['current'])
+
     def test_crash_recovery_never_blindly_resubmits(self):
         self.store.enqueue(self.link, self.source, 1)
         self.store.update_job(1, status='submitting')

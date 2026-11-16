@@ -15,6 +15,17 @@ async function api(path, body, signal) {
 }
 function action(id, handler){$(id).addEventListener('click', async e=>{e.preventDefault();const b=$(id);b.disabled=true;try{await handler();}catch(error){toast(error.message);}finally{b.disabled=false;}});}
 function image(id, src){const e=$(id);e.hidden=!src;if(src&&e.src!==src)e.src=src;if(!src)e.removeAttribute('src');}
+function cleanupResource(id,job,empty){
+  const container=$(id);container.replaceChildren();
+  if(!job){container.append(text('p',empty,'hint'));return;}
+  const labels={done:'已移入回收站',legacy_done:'已清理（历史完成时间未记录）',checking:'正在核对目录内容',
+    deleting:'正在提交删除',submitted:'云端删除中，等待回执',polling:'正在查询删除回执',
+    queued:'已到期，等待处理',waiting:'尚未到期',backoff:'等待重新核对',paused:'自动清理已暂停'};
+  let detail=labels[job.phase]||job.phase;
+  if(job.cleanup_completed_at!=null)detail+=' · '+new Date(job.cleanup_completed_at*1000).toLocaleString();
+  if(job.available_at>Date.now()/1000)detail+=' · 可处理时间：'+new Date(job.available_at*1000).toLocaleString();
+  container.append(text('strong','#'+job.id+' '+(job.resource_name||job.share_id)),text('small',detail));
+}
 async function refreshState(){
   const s=await api('/state');
   $('tg-state').textContent=states[s.telegram.state]||s.telegram.state;
@@ -36,6 +47,10 @@ async function refreshState(){
   $('cleanup-interval-current').textContent='当前删除处理间隔：'+s.cleanup_interval_seconds+' 秒';
   const queue=s.cleanup_queue;
   $('cleanup-queue-summary').textContent='全部分页：等待清理 '+(queue.pending||0)+' 条，清理中 '+((queue.deleting||0)+(queue.submitted||0))+' 条。转存记录按原任务编号排序，旧任务重试成功后仍可能在后面的分页。';
+  const progress=s.cleanup_progress;
+  cleanupResource('cleanup-last',progress.last,'暂无清理完成记录');
+  cleanupResource('cleanup-current',progress.current,'当前没有正在处理的清理任务');
+  cleanupResource('cleanup-next',progress.next,'暂无待清理资源');
   const clear=s.directory_clear,labels={queued:'等待清空',running:'清空处理中',done:'已移入回收站',blocked:'清空已停止',uncertain:'结果待核对'};
   $('clear-status').textContent=clear?clear.parent_name+' · '+labels[clear.state]+' · 完成 '+clear.done+'/'+clear.total+' 批'+(clear.error?' · '+clear.error:''):'';
   $('cleanup-state').textContent=cleanupEnabled?'已启用':'关闭 / 暂停';

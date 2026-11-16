@@ -66,6 +66,7 @@ class ClearTests(unittest.IsolatedAsyncioTestCase):
         self.store.update_job(1,cleanup_state='blocked')
         DirectoryClear(self.store,self.cloud)
         self.assertEqual(self.store.rows('SELECT cleanup_state FROM jobs WHERE id=1')[0]['cleanup_state'],'done')
+        self.assertIsNotNone(self.store.rows('SELECT cleanup_completed_at FROM jobs WHERE id=1')[0]['cleanup_completed_at'])
         self.cloud.delete_cleanup_targets.assert_awaited_once()
 
     async def test_preview_timeout_does_not_queue_deletion(self):

@@ -44,7 +44,8 @@ async def lifespan(app):
     app.state.directory_clear = DirectoryClear(store, cloud)
     app.state.cloud_qr = {'state': 'idle'}
     app.state.cloud_login_task = None
-    tasks = [asyncio.create_task(tg.run()), asyncio.create_task(Worker(store, cloud).run())]
+    app.state.worker = Worker(store, cloud)
+    tasks = [asyncio.create_task(tg.run()), asyncio.create_task(app.state.worker.run())]
     yield
     if app.state.cloud_login_task:
         tasks.append(app.state.cloud_login_task)
@@ -116,6 +117,7 @@ async def state():
         'cleanup_interval_seconds': store.get('cleanup_interval_seconds', 30),
         'cleanup_queue': {r['cleanup_state']: r['n'] for r in store.rows("""SELECT cleanup_state,COUNT(*) n
             FROM jobs WHERE status='success' AND cleanup_enabled=1 GROUP BY cleanup_state""")},
+        'cleanup_progress': store.cleanup_progress(app.state.worker.current_cleanup_id),
         'directory_clear': app.state.directory_clear.latest(),
         'counts': {r['status']: r['n'] for r in store.rows('SELECT status,COUNT(*) n FROM jobs GROUP BY status')},
     }

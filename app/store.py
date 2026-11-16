@@ -39,6 +39,7 @@ class Store:
             'cleanup_manifest': "TEXT NOT NULL DEFAULT ''", 'cleanup_state': "TEXT NOT NULL DEFAULT ''",
             'cleanup_task': "TEXT NOT NULL DEFAULT ''", 'cleanup_error': "TEXT NOT NULL DEFAULT ''",
             'cleanup_next': 'REAL NOT NULL DEFAULT 0',
+            'cleanup_completed_at': 'REAL',
             'cleanup_plan': "TEXT NOT NULL DEFAULT ''", 'cleanup_targets': "TEXT NOT NULL DEFAULT ''",
         }.items():
             if name not in columns:
@@ -84,7 +85,8 @@ class Store:
     def update_job(self, job_id, **fields):
         allowed = {'status', 'attempts', 'next_at', 'remote_task', 'error', 'code', 'resource_name',
                    'completed_at', 'cleanup_enabled', 'cleanup_folder', 'cleanup_name', 'cleanup_manifest',
-                   'cleanup_state', 'cleanup_task', 'cleanup_error', 'cleanup_next', 'cleanup_plan', 'cleanup_targets'}
+                   'cleanup_state', 'cleanup_task', 'cleanup_error', 'cleanup_next', 'cleanup_plan', 'cleanup_targets',
+                   'cleanup_completed_at'}
         if not fields.keys() <= allowed:
             raise ValueError('Invalid job fields')
         fields['updated'] = time.time()
@@ -93,6 +95,34 @@ class Store:
     def actionable_jobs(self):
         return self.rows("""SELECT id,status FROM jobs WHERE status IN ('failed','uncertain')
             AND cleanup_state NOT IN ('pending','deleting','submitted','uncertain') ORDER BY id""")
+
+    def cleanup_progress(self, current_id=None):
+        fields = 'id,resource_name,share_id,cleanup_state,cleanup_completed_at,completed_at,created,cleanup_next'
+        # shortcut: legacy rows lack cleanup times; keep the updated fallback until they are retired.
+        last = self.rows(f"""SELECT {fields} FROM jobs WHERE status='success' AND cleanup_state='done'
+            ORDER BY cleanup_completed_at IS NOT NULL DESC,cleanup_completed_at DESC,updated DESC,id DESC LIMIT 1""")
+        current = self.rows(f"""SELECT {fields} FROM jobs WHERE id=? AND status='success'
+            AND cleanup_state IN ('pending','deleting','submitted')""", (current_id,)) if current_id is not None else []
+        active = bool(current)
+        if not current:
+            current = self.rows(f"""SELECT {fields} FROM jobs WHERE status='success' AND cleanup_state IN ('deleting','submitted')
+                ORDER BY cleanup_state='deleting' DESC,COALESCE(completed_at,created),id LIMIT 1""")
+        now = time.time()
+        pending = self.rows(f"""SELECT {fields},MAX(COALESCE(completed_at,created)+?,cleanup_next) AS available_at
+            FROM jobs WHERE status='success' AND cleanup_enabled=1 AND cleanup_state='pending' AND id!=?
+            ORDER BY MAX(available_at,?),COALESCE(completed_at,created),id LIMIT 1""",
+            (self.get('cleanup_minutes',60)*60,current[0]['id'] if current else -1,now))
+        if last:
+            last[0]['phase'] = 'done' if last[0]['cleanup_completed_at'] is not None else 'legacy_done'
+        if current:
+            state = current[0]['cleanup_state']
+            current[0]['phase'] = 'checking' if state=='pending' else 'polling' if active and state=='submitted' else state
+        if pending:
+            job = pending[0]
+            job['phase'] = ('paused' if not self.get('auto_cleanup',False) else
+                            'backoff' if job['cleanup_next']>now and job['cleanup_next']==job['available_at'] else
+                            'waiting' if job['available_at']>now else 'queued')
+        return {'last':last[0] if last else None,'current':current[0] if current else None,'next':pending[0] if pending else None}
 
     def discard_jobs(self, ids):
         selected = set(ids) & {job['id'] for job in self.actionable_jobs()}
