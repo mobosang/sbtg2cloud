@@ -187,6 +187,29 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('temporary-test', str(page))
         self.assertEqual((await self.client.get(uri, headers={'X-Emby-Token': 'revoked'})).status_code, 401)
 
+    async def test_two_entrances_keep_separate_upstreams_and_share_one_cache_lookup(self):
+        self.store.set('media_proxy_secondary', {**CONFIG, 'upstream_url': 'http://other-emby.test:8096'})
+        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock)
+        await second.http.aclose()
+        second.http = httpx.AsyncClient(transport=httpx.MockTransport(self.upstream))
+        try:
+            self.assertIs(second.cache_lock, self.media.cache_lock)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(second.app), base_url='http://second.test') as client:
+                results = await asyncio.gather(
+                    self.client.get('/Videos/123/original.mkv', headers=self.auth),
+                    client.get('/Videos/123/original.mkv', headers=self.auth))
+                self.assertEqual([r.status_code for r in results], [302, 302])
+                self.assertEqual({r.url.host for r in self.requests}, {'emby.test', 'other-emby.test'})
+                self.cloud.download_url.assert_awaited_once()
+                self.assertEqual((self.media.redirects, second.redirects), (1, 1))
+                self.assertEqual(second.status()['public_port'], '12360')
+                await second.http.aclose()
+                second.http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(403)))
+                self.assertEqual((await client.get('/Videos/123/original.mkv', headers=self.auth)).status_code, 403)
+                self.cloud.download_url.assert_awaited_once()
+        finally:
+            await second.close()
+
     async def test_persistent_cache_is_reused_after_store_and_proxy_restart(self):
         await self.media.signed_url('/Media/影片/视频.mkv')
         self.store.execute('UPDATE media_links SET retained_until=created+86400')
@@ -290,6 +313,27 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('监听失败', self.media.error)
         self.assertNotIn('SECRET', self.media.error)
 
+    async def test_secondary_listener_uses_its_own_port_configuration(self):
+        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock)
+        self.store.set('media_proxy_secondary', CONFIG)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        try:
+            with patch.dict('os.environ', {'EMBY_PROXY_SECONDARY_LISTEN_PORT': str(port)}):
+                await second.start()
+                for _ in range(100):
+                    if second.status()['listening']:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(second.status()['listening'])
+                self.assertFalse(self.media.status()['listening'])
+                self.store.set('media_proxy_secondary', {**CONFIG, 'enabled': False})
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    self.assertEqual((await client.get(f'http://127.0.0.1:{port}/')).status_code, 503)
+        finally:
+            await second.close()
+
     async def test_server_origin_is_fixed_and_forwarded_headers_cannot_be_spoofed(self):
         await self.client.get('/other/path?next=http://evil.test', headers={**self.auth, 'X-Forwarded-For': 'evil',
                                                                           'Connection': 'X-Secret', 'X-Secret': 'drop'})
@@ -392,3 +436,14 @@ class MediaWebTests(unittest.TestCase):
                 self.assertEqual(client.post('/api/media/settings', json={**CONFIG, 'emby_prefix': '/'},
                                              headers=headers).status_code, 400)
                 self.assertEqual(client.portal.call(main.app.state.store.get, 'media_proxy'), CONFIG)
+                secondary = {**CONFIG, 'upstream_url': 'http://other-emby.test:8096'}
+                self.assertEqual(client.post('/api/media/secondary/settings', json=secondary).status_code, 403)
+                self.assertEqual(client.post('/api/media/secondary/settings', json=secondary, headers=headers).status_code, 200)
+                self.assertEqual(client.portal.call(main.app.state.store.get, 'media_proxy'), CONFIG)
+                self.assertEqual(client.portal.call(main.app.state.store.get, 'media_proxy_secondary'), secondary)
+                state = client.get('/api/state', headers=headers).json()
+                self.assertEqual(state['media_proxy']['upstream_url'], CONFIG['upstream_url'])
+                self.assertEqual(state['media_proxy_secondary']['upstream_url'], secondary['upstream_url'])
+                for endpoint, port in [('/api/media/settings', 12360), ('/api/media/secondary/settings', 12359)]:
+                    self.assertEqual(client.post(endpoint, json={**CONFIG, 'upstream_url': f'http://testserver:{port}'},
+                                                 headers=headers).status_code, 400)

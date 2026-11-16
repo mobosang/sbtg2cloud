@@ -171,6 +171,35 @@ test('cleanup resource cards show safe names, real stages and empty states',()=>
   assert.match(ui.get('cleanup-last').children[1].textContent,/历史完成时间未记录/);
 });
 
+test('secondary playback settings do not overwrite the existing entrance or its draft',async()=>{
+  const primary={enabled:true,listening:true,upstream_url:'http://first.test:8096',emby_prefix:'/Cloud/Guangya',
+    cloud_prefix:'/',public_port:'12359',redirects:1,error:''};
+  const secondary={...primary,upstream_url:'http://second.test:8096',public_port:'12360',redirects:0};
+  const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
+    target:{name:'/Media'},auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:10,
+    cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{},
+    media_proxy:primary,media_proxy_secondary:secondary};
+  const calls=[];
+  const ui=setup(async(url,options)=>{
+    calls.push({url,body:options.body});
+    if(url.endsWith('/media/secondary/settings'))Object.assign(secondary,JSON.parse(options.body));
+    return {ok:true,json:async()=>url.endsWith('/state')?state:{ok:true}};
+  });
+  ui.context.location={hostname:'192.0.2.1'};
+  await ui.context.refreshState();
+  assert.equal(ui.get('media-address').value,'http://192.0.2.1:12359');
+  assert.equal(ui.get('media-secondary-address').value,'http://192.0.2.1:12360');
+  ui.get('media-prefix').value='/UnchangedDraft';ui.get('media-form').handlers.input();
+  ui.get('media-secondary-upstream').value='http://new-second.test:8096';
+  ui.get('media-secondary-form').handlers.input();
+  await ui.get('media-secondary-form').onsubmit({preventDefault(){},target:{querySelector:()=>({})}});
+  assert.equal(primary.upstream_url,'http://first.test:8096');
+  assert.equal(secondary.upstream_url,'http://new-second.test:8096');
+  assert.equal(ui.get('media-prefix').value,'/UnchangedDraft');
+  assert.equal(calls.filter(x=>x.body).length,1);
+  assert.equal(calls.find(x=>x.body).url,'/api/media/secondary/settings');
+});
+
 test('cache list shows safe names, expiry, hit counts and pagination without exposing URLs',async()=>{
   const calls=[];
   const entry={path:'/Media/<video>.mkv',created:100,expires_at:200,retained_until:200,last_used:150,hits:7,usable:true};

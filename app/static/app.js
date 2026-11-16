@@ -4,7 +4,7 @@ const states = {proxy_config_error:'代理配置错误',not_configured:'未配�
 const jobStates = {queued:'排队中',preparing:'读取分享',submitting:'正在提交',submitted:'云端处理中',success:'已完成',failed:'失败',uncertain:'结果待核对',discarded:'已丢弃'};
 const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',submitted:'云端删除中',done:'已移入回收站',blocked:'清理已停止，需核对',uncertain:'删除结果待核对'};
 let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false;
-let mediaDirty=false;
+const mediaDirty=new Set();
 let mediaCachePage=1, mediaCachePages=1, mediaCacheRequest=0;
 function text(tag, value, cls) { const e=document.createElement(tag); e.textContent=value; if(cls)e.className=cls; return e; }
 function toast(message) { $('notice').textContent=message; $('notice').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('notice').hidden=true,7000); }
@@ -61,31 +61,33 @@ async function refreshState(){
   $('active').textContent=(s.counts.preparing||0)+(s.counts.submitting||0)+(s.counts.submitted||0);
   $('success').textContent=s.counts.success||0;
   $('failed').textContent=(s.counts.failed||0)+(s.counts.uncertain||0);
-  if(s.media_proxy){
-    const media=s.media_proxy;
-    if(!mediaDirty){
-      $('media-enabled').checked=media.enabled;
-      $('media-upstream').value=media.upstream_url;
-      $('media-prefix').value=media.emby_prefix;
-      $('media-cloud-prefix').value=media.cloud_prefix;
+  for(const [prefix,media] of [['media',s.media_proxy],['media-secondary',s.media_proxy_secondary]]){
+    if(!media)continue;
+    if(!mediaDirty.has(prefix)){
+      $(prefix+'-enabled').checked=media.enabled;
+      $(prefix+'-upstream').value=media.upstream_url;
+      $(prefix+'-prefix').value=media.emby_prefix;
+      $(prefix+'-cloud-prefix').value=media.cloud_prefix;
     }
-    $('media-state').textContent=!media.enabled?'未启用':media.listening?'已启用':'未监听';
+    $(prefix+'-state').textContent=!media.enabled?'未启用':media.listening?'已启用':'未监听';
     const host=location.hostname.includes(':')?'['+location.hostname+']':location.hostname;
-    $('media-address').value='http://'+host+':'+media.public_port;
-    $('media-hint').textContent=media.listening?'使用原 Emby 账号登录此播放入口；原来的 Emby / MediaTidy 地址仍可使用。':'播放端口尚未监听：请按 README 更新 Compose 并重建容器。';
-    $('media-last').textContent='本次运行已返回 302：'+media.redirects+' 次'+(media.last?' · 最近：'+media.last.name+' · '+new Date(media.last.at*1000).toLocaleString():'');
-    $('media-error').textContent=media.error||'';
+    $(prefix+'-address').value='http://'+host+':'+media.public_port;
+    $(prefix+'-hint').textContent=media.listening?'使用该上游原有账号重新登录此入口；原来的播放地址仍可使用。':'播放端口尚未监听：请按 README 更新 Compose 并重建容器。';
+    $(prefix+'-last').textContent='本次运行已返回 302：'+media.redirects+' 次'+(media.last?' · 最近：'+media.last.name+' · '+new Date(media.last.at*1000).toLocaleString():'');
+    $(prefix+'-error').textContent=media.error||'';
   }
 }
-$('media-form').addEventListener('input',()=>{mediaDirty=true;});
-$('media-form').onsubmit=async e=>{
-  e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;
-  try{
-    await api('/media/settings',{enabled:$('media-enabled').checked,upstream_url:$('media-upstream').value,
-      emby_prefix:$('media-prefix').value,cloud_prefix:$('media-cloud-prefix').value});
-    mediaDirty=false;await refreshState();toast('播放配置已保存；客户端连接播放入口后生效');
-  }catch(error){toast(error.message);}finally{button.disabled=false;}
-};
+for(const [prefix,endpoint] of [['media','/media/settings'],['media-secondary','/media/secondary/settings']]){
+  $(prefix+'-form').addEventListener('input',()=>mediaDirty.add(prefix));
+  $(prefix+'-form').onsubmit=async e=>{
+    e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;
+    try{
+      await api(endpoint,{enabled:$(prefix+'-enabled').checked,upstream_url:$(prefix+'-upstream').value,
+        emby_prefix:$(prefix+'-prefix').value,cloud_prefix:$(prefix+'-cloud-prefix').value});
+      mediaDirty.delete(prefix);await refreshState();toast('播放配置已保存；客户端连接播放入口后生效');
+    }catch(error){toast(error.message);}finally{button.disabled=false;}
+  };
+}
 async function refreshMediaCache(){
   const request=++mediaCacheRequest;
   const data=await api('/media/cache?page='+mediaCachePage);

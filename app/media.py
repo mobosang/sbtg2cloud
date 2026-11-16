@@ -86,29 +86,32 @@ class ProxyServer(uvicorn.Server):
 
 
 class MediaProxy:
-    def __init__(self, store, cloud):
+    def __init__(self, store, cloud, secondary=False, cache_lock=None):
         self.store, self.cloud = store, cloud
+        self.setting_key = 'media_proxy_secondary' if secondary else 'media_proxy'
+        self.env_prefix = 'EMBY_PROXY_SECONDARY' if secondary else 'EMBY_PROXY'
+        self.default_port = '12360' if secondary else '12359'
         self.http = httpx.AsyncClient(trust_env=False, follow_redirects=False,
                                       timeout=httpx.Timeout(30, read=120))
         self.app = Starlette(routes=[
             Route('/{path:path}', self.handle, methods=['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']),
             WebSocketRoute('/{path:path}', self.websocket)])
-        self.cache_lock = asyncio.Lock()
+        self.cache_lock = cache_lock if cache_lock is not None else asyncio.Lock()
         self.directories = {}
         self.cache_owner = None
         self.server = self.server_task = self.listener = None
         self.error, self.last, self.redirects = '', None, 0
 
     def settings(self):
-        return media_settings(self.store.get('media_proxy', {}))
+        return media_settings(self.store.get(self.setting_key, {}))
 
     def status(self):
         return {**self.settings(), 'listening': bool(self.server and self.server.started),
-                'public_port': os.environ.get('EMBY_PROXY_PORT', '12359'),
+                'public_port': os.environ.get(self.env_prefix + '_PORT', self.default_port),
                 'redirects': self.redirects, 'last': self.last, 'error': self.error}
 
     async def start(self):
-        port = os.environ.get('EMBY_PROXY_LISTEN_PORT', '')
+        port = os.environ.get(self.env_prefix + '_LISTEN_PORT', '')
         if not port:
             return
         try:
@@ -123,7 +126,7 @@ class MediaProxy:
         except (OSError, ValueError):
             if self.listener:
                 self.listener.close()
-            self.error = '播放入口监听失败，请检查 EMBY_PROXY_LISTEN_PORT 和端口占用'
+            self.error = f'播放入口监听失败，请检查 {self.env_prefix}_LISTEN_PORT 和端口占用'
             return
         self.server = ProxyServer(uvicorn.Config(self.app, access_log=False, log_config=None,
                                                 log_level='warning', lifespan='off'))

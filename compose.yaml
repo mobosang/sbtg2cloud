@@ -9,11 +9,14 @@ services:
     ports:
       - "${BIND_IP:-0.0.0.0}:8080:8080"
       - "${BIND_IP:-0.0.0.0}:${EMBY_PROXY_PORT:-12359}:8081"
+      - "${BIND_IP:-0.0.0.0}:${EMBY_PROXY_SECONDARY_PORT:-12360}:8082"
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
       EMBY_PROXY_LISTEN_PORT: "8081"
       EMBY_PROXY_PORT: ${EMBY_PROXY_PORT:-12359}
+      EMBY_PROXY_SECONDARY_LISTEN_PORT: "8082"
+      EMBY_PROXY_SECONDARY_PORT: ${EMBY_PROXY_SECONDARY_PORT:-12360}
       # Only Telegram uses the proxy address from .env.
       TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
       # Keep Guangya direct even if Docker/client defaults contain proxy settings.

@@ -62,6 +62,7 @@ docker build --platform linux/amd64 -t sbtg2cloud:local .
 | WebUI | `http://[IP]:[PORT:8080]` |
 | 端口 | 容器 `8080` → 主机 `8080`，TCP |
 | 可选播放端口 | 容器 `8081` → 主机 `12359`，TCP；同时添加环境变量 `EMBY_PROXY_LISTEN_PORT=8081`、`EMBY_PROXY_PORT=12359` |
+| 可选附加播放端口 | 容器 `8082` → 主机 `12360`，TCP；添加 `EMBY_PROXY_SECONDARY_LISTEN_PORT=8082`、`EMBY_PROXY_SECONDARY_PORT=12360` |
 | 数据路径 | 容器 `/data` → 主机 `/mnt/user/appdata/sbtg2cloud`，读写 |
 | Extra Parameters | `--user 99:100 --restart unless-stopped --security-opt no-new-privileges:true --cap-drop ALL` |
 
@@ -69,7 +70,7 @@ docker build --platform linux/amd64 -t sbtg2cloud:local .
 
 ## SenPlayer / Emby 光鸭 302 播放
 
-本功能作为播放入口使用，不代替 MediaTidy 整理，不改写已有 STRM，也不接管 Emby 媒体库。默认关闭。Compose 增加容器 `8081` 的端口映射；主机端口由私有 `.env` 的 `EMBY_PROXY_PORT` 配置，默认 `12359`。升级旧 Compose 时需保留原数据卷、管理端口和 Telegram 代理，增加这个端口及 `EMBY_PROXY_LISTEN_PORT=8081` 后重建容器，单纯重启不会增加映射。两个 HTTP 入口共用同一进程、SQLite、光鸭会话和云盘限速，不启动第二个转存实例。
+本功能作为播放入口使用，不代替 MediaTidy 整理，不改写已有 STRM，也不接管 Emby 媒体库。默认关闭。Compose 增加容器 `8081` 的端口映射；主机端口由私有 `.env` 的 `EMBY_PROXY_PORT` 配置，默认 `12359`。升级旧 Compose 时需保留原数据卷、管理端口和 Telegram 代理，增加这个端口及 `EMBY_PROXY_LISTEN_PORT=8081` 后重建容器，单纯重启不会增加映射。管理页和播放入口共用同一进程、SQLite、光鸭会话和云盘限速，不启动第二个转存实例。
 
 在管理页的“Emby · 光鸭 302 播放”填写并保存：
 
@@ -82,6 +83,10 @@ docker build --platform linux/amd64 -t sbtg2cloud:local .
 例如 Emby 中的视频路径为 `/CloudNAS/CloudDrive/光鸭云盘/Media/电影/示例.mkv`，映射后就是光鸭内的 `/Media/电影/示例.mkv`。只接受目录边界内的精确名称匹配，不按相似片名猜测；同名歧义、已移动/删除或类型不符会停止取链并显示错误。
 
 在 SenPlayer 添加 **Emby** 服务器，地址填 `http://你的Unraid局域网IP:12359`（以页面显示和实际映射为准），使用原来的 Emby 用户名和密码。可以另存为一个新服务器入口，保留原连接方便对比。海报墙、登录、播放进度、字幕及 WebSocket 控制请求继续转发给上游；不要将这个地址当作光鸭分享链接或新增网盘账号。
+
+需要给另一套反代增加光鸭 302 时，在同一管理页的“附加播放入口”配置其地址和路径映射，例如上游填 `http://proxy2.example:29996`。保留第一个入口，新入口默认 `http://你的Unraid局域网IP:12360`，容器端口为 `8082`。私有 `.env` 可设 `EMBY_PROXY_SECONDARY_PORT`；Compose 需要同时设置 `EMBY_PROXY_SECONDARY_LISTEN_PORT=8082` 并重建容器。两个入口分别保存配置、计数及错误，不会因保存附加入口而覆盖原入口。
+
+两个播放入口复用同一份持久直链缓存和取链锁，跨入口并发播放同一云盘路径也只生成一份有效直链。鉴权和其他请求各自交给配置的上游，401/403 时不会从缓存取链，也不会绕过该上游改连 Emby 后端。已有反代若有独立的播放会话或账号规则，客户端须使用该上游原有账号在新入口重新登录；不能把另一个入口的旧令牌或管理员 API Key 当作其有效用户会话。实际设备端登录和播放仍需联调确认。
 
 客户端请求 `/Videos/{id}/original.*` 或显式 `Static=true` 的 `/Videos/{id}/stream.*` 时，服务使用**该客户端的 Emby 凭据**重新查询 PlaybackInfo。通过 Emby 检查后才定位光鸭文件 ID，调用下载接口并返回 `302 Location: <signedURL>`。客户端直接向光鸭 CDN 读取视频和 Range 分段，sbtg2cloud 不读取这些视频字节。HLS、字幕烧录及需要转码的请求保留上游处理，不强制修改客户端能力或关闭转码。其他网盘及未匹配光鸭前缀的资源仍沿用上游播放链路。匹配光鸭但取链失败时返回明确错误，不悄悄回退成 NAS 中继；可使用原播放入口恢复原链路。
 

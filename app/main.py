@@ -47,7 +47,9 @@ async def lifespan(app):
     app.state.cloud_login_task = None
     app.state.worker = Worker(store, cloud)
     app.state.media = MediaProxy(store, cloud)
+    app.state.media_secondary = MediaProxy(store, cloud, secondary=True, cache_lock=app.state.media.cache_lock)
     await app.state.media.start()
+    await app.state.media_secondary.start()
     tasks = [asyncio.create_task(tg.run()), asyncio.create_task(app.state.worker.run())]
     yield
     if app.state.cloud_login_task:
@@ -56,7 +58,7 @@ async def lifespan(app):
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await tg.close()
-    await app.state.media.close()
+    await asyncio.gather(app.state.media.close(), app.state.media_secondary.close())
     await cloud.http.aclose()
     store.db.close()
 
@@ -123,6 +125,7 @@ async def state():
             FROM jobs WHERE status='success' AND cleanup_enabled=1 GROUP BY cleanup_state""")},
         'cleanup_progress': store.cleanup_progress(app.state.worker.current_cleanup_id),
         'media_proxy': app.state.media.status(),
+        'media_proxy_secondary': app.state.media_secondary.status(),
         'directory_clear': app.state.directory_clear.latest(),
         'counts': {r['status']: r['n'] for r in store.rows('SELECT status,COUNT(*) n FROM jobs GROUP BY status')},
     }
@@ -140,18 +143,28 @@ class MediaSettings(BaseModel):
     cloud_prefix: str = Field(default='/', max_length=4096)
 
 
-@app.post('/api/media/settings')
-async def save_media_settings(value: MediaSettings, request: Request):
+def set_media_settings(value, request, proxy):
     settings = media_settings(value.model_dump())
     parsed = urlsplit(settings['upstream_url'])
     if (settings['enabled'] and parsed.hostname in (request.url.hostname, 'localhost', '127.0.0.1', '::1', 'sbtg2cloud')
         and str(parsed.port or (443 if parsed.scheme == 'https' else 80)) in (
             str(request.url.port or 80), os.environ.get('EMBY_PROXY_PORT', '12359'),
-            os.environ.get('EMBY_PROXY_LISTEN_PORT', ''), '8080')):
+            os.environ.get('EMBY_PROXY_LISTEN_PORT', ''), os.environ.get('EMBY_PROXY_SECONDARY_PORT', '12360'),
+            os.environ.get('EMBY_PROXY_SECONDARY_LISTEN_PORT', ''), '8080')):
         raise HTTPException(400, '上游地址不可指向 sbtg2cloud 自身的管理或播放端口')
-    app.state.store.set('media_proxy', settings)
-    app.state.media.error = ''
+    app.state.store.set(proxy.setting_key, settings)
+    proxy.error = ''
     return {'ok': True}
+
+
+@app.post('/api/media/settings')
+async def save_media_settings(value: MediaSettings, request: Request):
+    return set_media_settings(value, request, app.state.media)
+
+
+@app.post('/api/media/secondary/settings')
+async def save_secondary_media_settings(value: MediaSettings, request: Request):
+    return set_media_settings(value, request, app.state.media_secondary)
 
 
 @app.get('/api/media/cache')
