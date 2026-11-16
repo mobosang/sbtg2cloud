@@ -68,3 +68,36 @@ test('cancelling bulk discard sends no mutation',async()=>{
   await ui.click('discard-attention');
   assert.deepEqual(calls,['/api/jobs/discard-preview']);
 });
+test('bulk retry queues all confirmed IDs and refreshes counts',async()=>{
+  const ids=Array.from({length:575},(_,i)=>i+1),calls=[];
+  const ui=setup(async(url,options)=>{
+    calls.push({url,body:options.body});
+    return {ok:true,json:async()=>url.endsWith('retry-preview')?{ids,count:575,uncertain:0}:{retried:574,skipped:1}};
+  });
+  let refreshed=0;ui.context.refreshJobs=async()=>{refreshed++;};ui.context.refreshState=async()=>{refreshed++;};
+  await ui.click('retry-attention');
+  assert.equal(calls.length,2);
+  assert.deepEqual(JSON.parse(calls[1].body),{ids,confirm_uncertain:false});
+  assert.equal(refreshed,2);
+  assert.match(ui.get('notice').textContent,/574.*1.*跳过/);
+});
+test('uncertain bulk retry requires a separate confirmation',async()=>{
+  const calls=[],messages=[];
+  const ui=setup(async url=>{
+    calls.push(url);return {ok:true,json:async()=>({ids:[1,2],count:2,uncertain:1})};
+  },message=>{messages.push(message);return messages.length===1;});
+  await ui.click('retry-attention');
+  assert.equal(messages.length,2);
+  assert.match(messages[1],/均尚未转存/);
+  assert.deepEqual(calls,['/api/jobs/retry-preview']);
+});
+test('confirmed uncertain bulk retry passes explicit permission',async()=>{
+  const calls=[];
+  const ui=setup(async(url,options)=>{
+    calls.push({url,body:options.body});
+    return {ok:true,json:async()=>url.endsWith('retry-preview')?{ids:[1,2],count:2,uncertain:1}:{retried:2,skipped:0}};
+  });
+  ui.context.refreshJobs=async()=>{};ui.context.refreshState=async()=>{};
+  await ui.click('retry-attention');
+  assert.deepEqual(JSON.parse(calls[1].body),{ids:[1,2],confirm_uncertain:true});
+});

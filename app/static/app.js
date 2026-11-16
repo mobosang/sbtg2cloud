@@ -172,6 +172,7 @@ async function refreshJobs(){
   const result=await api('/job-pages?page='+jobsPage+'&page_size='+jobsPageSize+'&status_filter='+jobsFilter+snapshot);
   if(request!==jobsRequest)return;
   $('discard-attention').hidden=jobsFilter!=='attention'||result.total===0;
+  $('retry-attention').hidden=$('discard-attention').hidden;
   jobsPage=result.page;jobsPages=result.pages;
   // First page follows incoming messages; older pages retain their snapshot boundary.
   jobsMaxId=jobsPage===1?null:result.max_id;
@@ -189,6 +190,15 @@ async function filterJobs(value,scroll=false){
 action('show-queued',()=>filterJobs('queued',true));
 action('show-attention',()=>filterJobs('attention',true));
 $('job-filter').onchange=e=>filterJobs(e.target.value).catch(error=>toast(error.message));
+action('retry-attention',async()=>{
+  const preview=await api('/jobs/retry-preview');
+  if(!preview.count){toast('暂无可重试任务；有关联清理操作的任务需单独核对');return;}
+  if(!confirm('确认重试全部 '+preview.count+' 条需要处理的任务（跨全部分页）？将保留原保存目录和提取码，按原队列限速依次处理。'))return;
+  if(preview.uncertain&&!confirm('其中 '+preview.uncertain+' 条结果待核对，可能已经转存。请先检查云盘，确认这些任务均尚未转存后再继续，否则可能重复保存。确认尚未转存并继续？'))return;
+  const result=await api('/jobs/retry-batch',{ids:preview.ids,confirm_uncertain:preview.uncertain>0});
+  await refreshJobs();await refreshState();
+  toast('已重新排队 '+result.retried+' 条'+(result.skipped?'，'+result.skipped+' 条状态已变化，已跳过':''));
+});
 action('discard-attention',async()=>{
   const preview=await api('/jobs/discard-preview');
   if(!preview.count){toast('暂无可丢弃任务；有关联清理操作的任务需单独核对');return;}

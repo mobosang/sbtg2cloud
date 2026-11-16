@@ -90,17 +90,29 @@ class Store:
         fields['updated'] = time.time()
         self.execute('UPDATE jobs SET ' + ','.join(f'{k}=?' for k in fields) + ' WHERE id=?', (*fields.values(), job_id))
 
-    def discardable_jobs(self):
+    def actionable_jobs(self):
         return self.rows("""SELECT id,status FROM jobs WHERE status IN ('failed','uncertain')
             AND cleanup_state NOT IN ('pending','deleting','submitted','uncertain') ORDER BY id""")
 
     def discard_jobs(self, ids):
-        selected = set(ids) & {job['id'] for job in self.discardable_jobs()}
+        selected = set(ids) & {job['id'] for job in self.actionable_jobs()}
         now = time.time()
         # Keep shares and receipts, and recheck eligibility immediately before updating.
         with self.db:
             self.db.executemany("UPDATE jobs SET status='discarded',updated=? WHERE id=?",
                                 [(now, jid) for jid in selected])
+        return len(selected)
+
+    def retry_jobs(self, ids, confirm_uncertain=False, code=''):
+        ids = set(ids)
+        selected = {job['id']: job['status'] for job in self.actionable_jobs() if job['id'] in ids}
+        if not confirm_uncertain and 'uncertain' in selected.values():
+            raise ValueError('请先核对云盘，确认结果待核对的任务均尚未转存')
+        now = time.time()
+        with self.db:
+            self.db.executemany("""UPDATE jobs SET status='queued',attempts=0,next_at=0,
+                remote_task=NULL,error='',code=CASE WHEN ?='' THEN code ELSE ? END,updated=? WHERE id=?""",
+                [(code, code, now, jid) for jid in selected])
         return len(selected)
 
     def enqueue(self, link, source, message_id, resource_name=''):

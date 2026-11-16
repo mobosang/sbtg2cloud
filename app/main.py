@@ -384,21 +384,35 @@ class Retry(BaseModel):
     confirm_uncertain: bool = False
 
 
-class BulkDiscard(BaseModel):
+class JobBatch(BaseModel):
     ids: list[Annotated[int, Field(strict=True, ge=1)]] = Field(min_length=1, max_length=100000)
 
 
+class BulkRetry(JobBatch):
+    confirm_uncertain: bool = Field(default=False, strict=True)
+
+
+@app.get('/api/jobs/retry-preview')
 @app.get('/api/jobs/discard-preview')
-async def discard_preview():
-    jobs = app.state.store.discardable_jobs()
+async def job_action_preview():
+    jobs = app.state.store.actionable_jobs()
     return {'ids': [job['id'] for job in jobs], 'count': len(jobs),
             'uncertain': sum(job['status'] == 'uncertain' for job in jobs)}
 
 
 @app.post('/api/jobs/discard-batch')
-async def discard_batch(value: BulkDiscard):
+async def discard_batch(value: JobBatch):
     count = app.state.store.discard_jobs(value.ids)
     return {'discarded': count, 'skipped': len(set(value.ids)) - count}
+
+
+@app.post('/api/jobs/retry-batch')
+async def retry_batch(value: BulkRetry):
+    try:
+        count = app.state.store.retry_jobs(value.ids, value.confirm_uncertain)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return {'retried': count, 'skipped': len(set(value.ids)) - count}
 
 
 @app.post('/api/jobs/{job_id}/discard')
@@ -418,11 +432,10 @@ async def discard(job_id: int):
 
 @app.post('/api/jobs/{job_id}/retry')
 async def retry(job_id: int, value: Retry):
-    store = app.state.store
-    rows = store.rows('SELECT * FROM jobs WHERE id=?', (job_id,))
-    if not rows or rows[0]['status'] not in ('failed', 'uncertain'):
-        raise HTTPException(409, '只可重试失败或结果不明的任务')
-    if rows[0]['status'] == 'uncertain' and not value.confirm_uncertain:
-        raise HTTPException(409, '请先核对云盘，确认尚未转存')
-    store.update_job(job_id, status='queued', attempts=0, next_at=0, remote_task=None, error='', code=value.code or rows[0]['code'])
+    try:
+        count = app.state.store.retry_jobs([job_id], value.confirm_uncertain, value.code)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    if not count:
+        raise HTTPException(409, '只可重试失败或待核对且没有进行中清理操作的任务')
     return {'ok': True}

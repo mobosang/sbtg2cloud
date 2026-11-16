@@ -301,6 +301,56 @@ class WebTests(unittest.TestCase):
                 cloud.prepare.assert_not_awaited()
                 cloud.delete_cleanup_targets.assert_not_awaited()
 
+    def test_batch_retry_requires_confirmation_and_preserves_queue_semantics(self):
+        from app import main
+        with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):
+            with TestClient(main.app) as client:
+                headers = {'X-Sbtg-Client': 'web'}
+                store = main.app.state.store
+                def seed():
+                    for i in range(1,41):
+                        store.enqueue({'share_id':str(i),'url':'https://example.com','code':'AB12'},
+                                      {'id':1,'target_id':'parent','target_name':'/Media'},i)
+                        status = 'failed' if i<32 or i>=37 else {32:'uncertain',33:'queued',34:'submitted',35:'success',36:'discarded'}[i]
+                        store.update_job(i,status=status,remote_task='original-receipt',attempts=2,next_at=100,error='old error')
+                    for i,state in enumerate(('uncertain','submitted','pending','deleting'),37):
+                        store.update_job(i,cleanup_state=state)
+                client.portal.call(seed)
+                cloud = main.app.state.cloud
+                cloud.submit = AsyncMock()
+                cloud.prepare = AsyncMock()
+                cloud.delete_cleanup_targets = AsyncMock()
+                preview=client.get('/api/jobs/retry-preview',headers=headers).json()
+                self.assertEqual((preview['count'],preview['uncertain']),(32,1))
+                self.assertEqual(client.get('/api/jobs/retry-preview').status_code,403)
+                body={'ids':preview['ids']}
+                self.assertEqual(client.post('/api/jobs/retry-batch',headers=headers,json=body).status_code,409)
+                self.assertEqual(client.get('/api/job-pages?status_filter=attention',headers=headers).json()['total'],36)
+                client.portal.call(lambda:store.update_job(1,status='success'))
+                client.portal.call(lambda:store.update_job(33,status='failed'))
+                ids=preview['ids']+[35,36,37,38,39,40,999,32]
+                body={'ids':ids,'confirm_uncertain':True}
+                result=client.post('/api/jobs/retry-batch',headers=headers,json=body).json()
+                self.assertEqual(result,{'retried':31,'skipped':8})
+                self.assertEqual(client.post('/api/jobs/retry-batch',headers=headers,json=body).json()['retried'],0)
+                jobs=client.get('/api/job-pages?page_size=100',headers=headers).json()['items']
+                job=next(x for x in jobs if x['id']==32)
+                self.assertEqual((job['status'],job['attempts'],job['next_at'],job['remote_task'],job['error']),
+                                 ('queued',0,0,None,''))
+                self.assertEqual((job['target_id'],job['code'],job['share_id']),('parent','AB12','32'))
+                attention=client.get('/api/job-pages?status_filter=attention',headers=headers).json()
+                self.assertEqual({x['id'] for x in attention['items']},{33,37,38,39,40})
+                self.assertEqual(client.post('/api/jobs/37/retry',headers=headers,json={}).status_code,409)
+                self.assertEqual(client.post('/api/jobs/33/retry',headers=headers,json={'code':'NEW'}).status_code,200)
+                refreshed=client.get('/api/jobs',headers=headers).json()
+                self.assertEqual(next(x for x in refreshed if x['id']==33)['code'],'NEW')
+                for body in ({'ids':[]},{'ids':[True]},{'ids':['1']},{'ids':[0]},
+                             {'ids':[2],'confirm_uncertain':'yes'}):
+                    self.assertEqual(client.post('/api/jobs/retry-batch',headers=headers,json=body).status_code,422)
+                cloud.prepare.assert_not_awaited()
+                cloud.submit.assert_not_awaited()
+                cloud.delete_cleanup_targets.assert_not_awaited()
+
     def test_job_pagination_sizes_boundaries_and_snapshot(self):
         from app import main
         with tempfile.TemporaryDirectory() as tmp, patch.object(main, 'DATA', Path(tmp)):
