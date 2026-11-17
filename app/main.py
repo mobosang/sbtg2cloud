@@ -48,7 +48,8 @@ async def lifespan(app):
     app.state.cloud_login_task = None
     app.state.worker = Worker(store, cloud)
     app.state.media = MediaProxy(store, cloud)
-    app.state.media_secondary = MediaProxy(store, cloud, secondary=True, cache_lock=app.state.media.cache_lock)
+    app.state.media_secondary = MediaProxy(store, cloud, secondary=True, cache_lock=app.state.media.cache_lock,
+                                           directory_cache=app.state.media.directory_cache)
     await app.state.media.start()
     await app.state.media_secondary.start()
     tasks = [asyncio.create_task(tg.run()), asyncio.create_task(app.state.worker.run())]

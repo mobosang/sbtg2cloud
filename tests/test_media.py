@@ -159,7 +159,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cloud.pages.await_count, 3)
 
     async def test_missing_cached_child_refreshes_only_its_parent(self):
-        self.media.cache_owner = self.store.get('cloud_cache_owner')
+        self.media.directory_cache['owner'] = self.store.get('cloud_cache_owner')
         self.media.directories['movie'] = (time.monotonic() + 300, [])
         r = await self.client.get('/Videos/123/original.mkv', headers=self.auth)
         self.assertEqual(r.status_code, 302)
@@ -189,11 +189,13 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_two_entrances_keep_separate_upstreams_and_share_one_cache_lookup(self):
         self.store.set('media_proxy_secondary', {**CONFIG, 'upstream_url': 'http://other-emby.test:8096'})
-        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock)
+        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock,
+                            directory_cache=self.media.directory_cache)
         await second.http.aclose()
         second.http = httpx.AsyncClient(transport=httpx.MockTransport(self.upstream))
         try:
             self.assertIs(second.cache_lock, self.media.cache_lock)
+            self.assertIs(second.directory_cache, self.media.directory_cache)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(second.app), base_url='http://second.test') as client:
                 results = await asyncio.gather(
                     self.client.get('/Videos/123/original.mkv', headers=self.auth),
@@ -226,6 +228,80 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row['expires_at'], row['retained_until'])
         finally:
             await restarted.close()
+
+    async def test_cache_hit_does_not_wait_behind_another_files_cold_lookup(self):
+        await self.media.signed_url('/Media/影片/视频.mkv')
+        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock,
+                            directory_cache=self.media.directory_cache)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow_lookup(path):
+            entered.set()
+            await release.wait()
+            return 'other-video'
+        self.media.resolve = slow_lookup
+        cold = asyncio.create_task(self.media.signed_url('/Other/video.mkv'))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(await asyncio.wait_for(second.signed_url('/Media/影片/视频.mkv'), 1), LINK)
+            self.assertFalse(cold.done())
+            self.cloud.download_url.assert_awaited_once()
+        finally:
+            release.set()
+            await cold
+            await second.close()
+
+    async def test_cached_link_needs_no_oauth_refresh_but_still_checks_emby(self):
+        uri = '/Videos/123/original.mkv'
+        self.assertEqual((await self.client.get(uri, headers=self.auth)).status_code, 302)
+        self.store.save_cloud_token({'access_token': 'expired', 'refresh_token': 'refresh-test', 'expires_at': 0})
+        self.cloud.token = AsyncMock(side_effect=CloudError('模拟续期暂不可用', retryable=True))
+        self.assertEqual((await self.client.get(uri, headers=self.auth)).status_code, 302)
+        self.assertEqual((await self.client.get(uri, headers={'X-Emby-Token': 'revoked'})).status_code, 401)
+        self.cloud.token.assert_not_awaited()
+        self.store.execute('UPDATE media_links SET expires_at=0')
+        self.assertEqual((await self.client.get(uri, headers=self.auth)).status_code, 502)
+        self.cloud.token.assert_awaited_once()
+        self.cloud.download_url.assert_awaited_once()
+
+    async def test_new_file_on_other_entrance_reuses_directories_and_switches_owner_safely(self):
+        def directory(endpoint, payload):
+            rows = list(self.directory(endpoint, payload))
+            if payload['parentId'] == 'movie':
+                rows.append({'fileId': 'next-video', 'fileName': 'next.mkv', 'resType': 1})
+            return rows
+        self.cloud.pages.side_effect = directory
+        await self.media.signed_url('/Media/影片/视频.mkv')
+        self.assertEqual(self.cloud.pages.await_count, 3)
+        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock,
+                            directory_cache=self.media.directory_cache)
+        try:
+            await second.signed_url('/Media/影片/next.mkv')
+            self.assertEqual(self.cloud.pages.await_count, 3)
+            self.assertEqual(self.cloud.download_url.await_args.args, ('next-video',))
+            old_owner = self.media.directory_cache['owner']
+            self.store.save_cloud_token({'access_token': 'new-account', 'refresh_token': 'new-refresh',
+                                         'expires_at': time.time()+3600}, new_session=True)
+            await second.signed_url('/Media/影片/next.mkv')
+            self.assertNotEqual(self.media.directory_cache['owner'], old_owner)
+            self.assertEqual(self.cloud.pages.await_count, 6)
+            await self.media.signed_url('/Media/影片/视频.mkv')
+            self.assertEqual(self.cloud.pages.await_count, 6)
+            self.assertEqual(self.cloud.download_url.await_count, 4)
+        finally:
+            await second.close()
+
+    async def test_shared_directory_cache_keeps_its_five_minute_expiry(self):
+        await self.media.signed_url('/Media/影片/视频.mkv')
+        second = MediaProxy(self.store, self.cloud, secondary=True, cache_lock=self.media.cache_lock,
+                            directory_cache=self.media.directory_cache)
+        try:
+            for parent, (_, rows) in list(self.media.directories.items()):
+                self.media.directories[parent] = (0, rows)
+            self.store.execute('DELETE FROM media_links')
+            await second.signed_url('/Media/影片/视频.mkv')
+            self.assertEqual(self.cloud.pages.await_count, 6)
+        finally:
+            await second.close()
 
     async def test_cache_record_and_url_follow_provider_expiry_without_a_fixed_day_limit(self):
         for duration, expected in [(172800, 182795), (3600, 13595), (0, 10000)]:

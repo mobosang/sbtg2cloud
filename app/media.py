@@ -86,7 +86,7 @@ class ProxyServer(uvicorn.Server):
 
 
 class MediaProxy:
-    def __init__(self, store, cloud, secondary=False, cache_lock=None):
+    def __init__(self, store, cloud, secondary=False, cache_lock=None, directory_cache=None):
         self.store, self.cloud = store, cloud
         self.setting_key = 'media_proxy_secondary' if secondary else 'media_proxy'
         self.env_prefix = 'EMBY_PROXY_SECONDARY' if secondary else 'EMBY_PROXY'
@@ -97,8 +97,8 @@ class MediaProxy:
             Route('/{path:path}', self.handle, methods=['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']),
             WebSocketRoute('/{path:path}', self.websocket)])
         self.cache_lock = cache_lock if cache_lock is not None else asyncio.Lock()
-        self.directories = {}
-        self.cache_owner = None
+        self.directory_cache = directory_cache if directory_cache is not None else {'owner': None, 'items': {}}
+        self.directories = self.directory_cache['items']
         self.server = self.server_task = self.listener = None
         self.error, self.last, self.redirects = '', None, 0
 
@@ -195,19 +195,25 @@ class MediaProxy:
         return parent
 
     async def signed_url(self, path):
-        # Coalesce concurrent seeks/clients; directory reads retain the shared Guangya pacing.
+        # An issued CDN link needs no OAuth refresh; Emby authorization is checked per request.
+        owner = self.store.get('cloud_cache_owner')
+        cached = self.store.media_link(owner, path, time.time()) if owner else None
+        if cached:
+            return cached
+        # Only misses wait for another lookup; recheck after it may have populated the cache.
         async with self.cache_lock:
+            owner = self.store.get('cloud_cache_owner')
+            cached = self.store.media_link(owner, path, time.time()) if owner else None
+            if cached:
+                return cached
             await self.cloud.token()
             owner = self.store.get('cloud_cache_owner')
             if not owner:
                 self.store.save_cloud_token(self.store.get('cloud_token'))
                 owner = self.store.get('cloud_cache_owner')
-            if owner != self.cache_owner:
+            if owner != self.directory_cache['owner']:
                 self.directories.clear()
-                self.cache_owner = owner
-            cached = self.store.media_link(owner, path, time.time())
-            if cached:
-                return cached
+                self.directory_cache['owner'] = owner
             fid = await self.resolve(path)
             started = time.time()
             url, duration = await self.cloud.download_url(fid)
