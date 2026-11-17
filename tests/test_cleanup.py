@@ -20,6 +20,7 @@ class CleanupTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(self.tmp.name)
         self.cloud = Cloud(self.store)
+        self.cloud.share_size = AsyncMock(return_value=1_000_000_000)
         self.worker = Worker(self.store, self.cloud)
         self.source = {'id': 1, 'target_id': 'parent', 'target_name': '/Media'}
 

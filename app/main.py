@@ -119,6 +119,7 @@ async def state():
                      'qr': qr_image(tg.qr_url)},
         'cloud': {'configured': bool(store.get('cloud_token')), 'error': cloud.login_error, **app.state.cloud_qr},
         'target': store.get('target', {'id': '', 'name': '/'}),
+        'share_size_limit_gb': store.get('share_size_limit_gb', 200),
         'auto_cleanup': bool(store.get('auto_cleanup', False)),
         'cleanup_minutes': store.get('cleanup_minutes', 60),
         'cleanup_interval_seconds': store.get('cleanup_interval_seconds', 30),
@@ -178,6 +179,16 @@ async def clear_media_cache():
     async with app.state.media.cache_lock:
         count = app.state.store.execute('DELETE FROM media_links').rowcount
         return {'cleared': count}
+
+
+class ShareLimit(BaseModel):
+    gb: int = Field(ge=1, strict=True)
+
+
+@app.post('/api/shares/limit')
+async def share_limit(value: ShareLimit):
+    app.state.store.set('share_size_limit_gb', value.gb)
+    return {'ok': True}
 
 
 class CleanupSettings(BaseModel):

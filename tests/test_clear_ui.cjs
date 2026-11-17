@@ -168,9 +168,41 @@ test('confirmed uncertain bulk retry passes explicit permission',async()=>{
   await ui.click('retry-attention');
   assert.deepEqual(JSON.parse(calls[1].body),{ids:[1,2],confirm_uncertain:true});
 });
+test('share size limit saves GB and polling preserves unsaved input',async()=>{
+  const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
+    target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
+    cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{}};
+  const calls=[];
+  const ui=setup(async(url,options)=>{
+    calls.push({url,body:options.body});
+    if(url.endsWith('/shares/limit'))state.share_size_limit_gb=JSON.parse(options.body).gb;
+    return {ok:true,json:async()=>url.endsWith('/state')?state:{ok:true}};
+  });
+  await ui.context.refreshState();
+  assert.equal(ui.get('share-limit').value,200);
+  const input=ui.get('share-limit');input.value='500';input.oninput();
+  await ui.context.refreshState();assert.equal(input.value,'500');
+  const button={disabled:false};
+  await ui.get('share-limit-form').onsubmit({preventDefault(){},target:{querySelector:()=>button}});
+  assert.equal(state.share_size_limit_gb,500);
+  assert.equal(button.disabled,false);
+  assert.match(ui.get('share-limit-current').textContent,/500 GB/);
+  assert.deepEqual(JSON.parse(calls.find(x=>x.url.endsWith('/shares/limit')).body),{gb:500});
+});
+
+test('failed limit save keeps the input editable and reports the error',async()=>{
+  const ui=setup(async()=>({ok:false,json:async()=>({detail:'输入格式有误'})}));
+  ui.get('share-limit').value='0';ui.get('share-limit').oninput();
+  const button={disabled:false};
+  await ui.get('share-limit-form').onsubmit({preventDefault(){},target:{querySelector:()=>button}});
+  assert.equal(button.disabled,false);
+  assert.equal(ui.get('share-limit').value,'0');
+  assert.equal(ui.get('notice').textContent,'输入格式有误');
+});
+
 test('interval form saves seconds and polling preserves unsaved input',async()=>{
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
-    target:{name:'/Media'},auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
+    target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
     cleanup_queue:{pending:75,submitted:1},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{}};
   const calls=[];
   const ui=setup(async(url,options)=>{
@@ -198,7 +230,7 @@ test('cleanup shortcut opens the full cleanup filter',async()=>{
 
 test('media settings preserve edits during polling and save the playback mapping',async()=>{
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
-    target:{name:'/Media'},auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:30,
+    target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:30,
     cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{},
     media_proxy:{enabled:false,listening:true,upstream_url:'http://emby.test:8096',emby_prefix:'/Cloud/Guangya',
       cloud_prefix:'/',public_port:'12359',redirects:1,last:{name:'<video>.mkv',at:100},error:''}};
@@ -243,7 +275,7 @@ test('secondary playback settings do not overwrite the existing entrance or its 
     cloud_prefix:'/',public_port:'12359',redirects:1,error:''};
   const secondary={...primary,upstream_url:'http://second.test:8096',public_port:'12360',redirects:0};
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
-    target:{name:'/Media'},auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:10,
+    target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:10,
     cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{},
     media_proxy:primary,media_proxy_secondary:secondary};
   const calls=[];

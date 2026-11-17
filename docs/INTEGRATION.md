@@ -21,11 +21,14 @@
 | 续期 | 同 token 接口，refresh_token grant | 更新并保存 access/refresh token |
 | 列目录 | `api.guangyapan.com/userres/v1/file/get_file_list` | `parentId`，page 从0开始；`data.list`；`resType=2` 为目录 |
 | 分享令牌 | `/userres/v1/get_share_access_token` | `{shareId, code}` → `data.accessToken` |
+| 分享总大小 | `/userres/v1/get_share_summary` | `{shareId, needFileNum:false}` → `data.totalFileSize`，单位字节，包含子目录 |
 | 分享列表 | `/userres/v1/get_share_page_files_list` | `accessToken,parentId,pageSize,cursor`；`data.list,hasMore,cursor` |
 | 转存 | `/userres/v1/restore_share` | `accessToken,fileIds,parentId` → `data.taskId` |
 | 进度 | `/userres/v1/get_task_status` | `taskId`；`data.status=2` 完成，`3` 失败，终态 `detail.code!=0` 同样失败 |
 
 匿名验证完成：扫码请求正常返回；未扫码轮询返回 HTTP 400 / authorization_pending。未将匿名设备码或二维码保存到项目。
+
+分享大小限制（2026-11-17）：[官方 Drive Skill 1.0.2](https://gyp.guangyapan.com/guangyapan_drive/guangyapan-drive-1.0.2-bundled.zip) 的 `getShareSummary` 使用上述摘要接口；已通过部署环境只读请求确认 `totalFileSize` 为整数字节数。监听和手动任务在转存前共用此检查，不调用下载准备接口，不逐层遍历分享。WebUI 的上限以正整数 GB 保存为 SQLite 设置 `share_size_limit_gb`，默认 200；提交前再核对当前上限。超限标记 `discarded`，大小字段缺失或异常则停止转存；已取得云端回执的任务仍只轮询原任务。限制依赖光鸭返回的摘要，不代表实际下载流量或后续 FFprobe 消耗。
 
 用户部署环境只读诊断确认（2026-10-19）：普通空目录的 `file/get_file_list` 返回 HTTP 200，`data` 为 `{}`，没有 `total` 或 `list`；非空目录返回 `data.total` 和 `data.list`。仅对普通目录列表接受空对象，不推广到分享游标接口或未知的非空响应结构。已加入空子目录递归核对及旧临时空目录重试的回归测试。
 

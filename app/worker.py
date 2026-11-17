@@ -14,6 +14,15 @@ class Worker:
         self.directory_clear = DirectoryClear(store, cloud)
         resume_reduced_cleanup(store)
 
+    def discard_oversized(self, job_id, size):
+        limit = self.store.get('share_size_limit_gb', 200)
+        if size <= limit * 1_000_000_000:
+            return False
+        self.store.update_job(job_id, status='discarded',
+                              error=f'分享总大小 {size:,} 字节（约 {size / 1_000_000_000:.3f} GB），'
+                                    f'超过上限 {limit} GB；已丢弃，未提交转存')
+        return True
+
     async def process(self, job):
         jid = job['id']
         if job['remote_task']:
@@ -44,9 +53,13 @@ class Worker:
             return
         attempts = job['attempts'] + 1
         self.store.update_job(jid, status='preparing', attempts=attempts)
-        stage = '读取分享'
+        stage = '核对分享大小'
         parent = job['target_id']
         try:
+            size = await self.cloud.share_size(job['share_id'])
+            if self.discard_oversized(jid, size):
+                return
+            stage = '读取分享'
             if job['cleanup_enabled']:
                 access, ids, title, source_rows = await self.cloud.prepare(job['share_id'], job['code'], details=True)
             else:
@@ -75,6 +88,9 @@ class Worker:
             return
         except Exception:
             self.store.update_job(jid, status='failed', error=f'{stage}发生异常，未提交转存；请检查接口或配置后重试')
+            return
+        # Settings may change while share and destination metadata are being read.
+        if self.discard_oversized(jid, size):
             return
         self.store.update_job(jid, status='submitting', error='')
         try:

@@ -207,6 +207,15 @@ class Cloud:
             self.history_cache[parent] = (time.monotonic(), rows)
             return rows
 
+    async def share_size(self, share_id):
+        data = await self.call('/get_share_summary', {'shareId': share_id, 'needFileNum': False})
+        size = data.get('totalFileSize') if isinstance(data, dict) else None
+        if isinstance(size, str) and size.isascii() and size.isdigit():
+            size = int(size)
+        if type(size) is not int or size < 0:
+            raise CloudError('无法确认分享总大小，停止转存')
+        return size
+
     async def prepare(self, share_id, code, details=False):
         access = await self.call('/get_share_access_token', {'shareId': share_id, 'code': code})
         if not isinstance(access, dict) or not access.get('accessToken'):

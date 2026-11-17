@@ -125,6 +125,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(self.tmp.name)
         self.cloud = Cloud(self.store)
+        self.cloud.share_size = AsyncMock(return_value=1_000_000_000)
         self.store.enqueue(extract('https://www.guangyapan.com/s/test')[0],
                            {'id': 1, 'target_id': '', 'target_name': '/'}, 1)
 

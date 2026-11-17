@@ -3,7 +3,7 @@ let editingSources = false, visibleJobs = [], sourceList = [], folderStack = [],
 const states = {proxy_config_error:'代理配置错误',not_configured:'未配置',connecting:'连接中',connected:'已连接',disconnected:'连接中断',login_required:'待登录',scan_qr:'等待扫码',password_required:'需要两步验证',qr_expired:'二维码已过期',authorized:'已授权',expired:'二维码已过期',failed:'失败',idle:'未登录'};
 const jobStates = {queued:'排队中',preparing:'读取分享',submitting:'正在提交',submitted:'云端处理中',success:'已完成',failed:'失败',uncertain:'结果待核对',discarded:'已丢弃'};
 const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',submitted:'云端删除中',done:'已移入回收站',blocked:'清理已停止，需核对',uncertain:'删除结果待核对'};
-let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false;
+let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false, shareLimitDirty=false;
 const mediaDirty=new Set();
 let mediaCachePage=1, mediaCachePages=1, mediaCacheRequest=0;
 const pages={overview:'概览',telegram:'Telegram',cloud:'光鸭云盘',sources:'监听来源',jobs:'转存记录',cleanup:'自动清理',media:'302 播放'};
@@ -54,6 +54,8 @@ async function refreshState(){
   image('cloud-image',s.cloud.qr);
   $('target').textContent=s.target.name;
   $('manual-share-target').textContent=s.target.name;
+  if(!shareLimitDirty)$('share-limit').value=s.share_size_limit_gb;
+  $('share-limit-current').textContent='当前分享包大小上限：'+s.share_size_limit_gb+' GB';
   cleanupEnabled=s.auto_cleanup;
   cleanupMinutes=s.cleanup_minutes;
   if(!delayDirty)$('cleanup-delay').value=cleanupMinutes;
@@ -137,6 +139,12 @@ $('password-form').addEventListener('submit',async e=>{e.preventDefault();const 
 action('tg-qr',async()=>{await api('/telegram/qr',{});await refreshState();});
 action('tg-logout',async()=>{if(confirm('退出此项目使用的 Telegram 会话，并停用所有监听来源？')){await api('/telegram/logout',{});await refreshState();await refreshSources();}});
 action('cloud-qr',async()=>{await api('/cloud/qr',{});await refreshState();});
+$('share-limit').oninput=()=>{shareLimitDirty=true;};
+$('share-limit-form').onsubmit=async e=>{
+  e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;
+  try{await api('/shares/limit',{gb:Number($('share-limit').value)});shareLimitDirty=false;await refreshState();toast('分享包大小上限已保存，超限分享自动丢弃');}
+  catch(error){toast(error.message);}finally{button.disabled=false;}
+};
 $('cleanup-delay').oninput=()=>{delayDirty=true;};
 $('cleanup-delay-form').onsubmit=async e=>{
   e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;

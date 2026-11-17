@@ -96,6 +96,7 @@ class ManualShareTests(unittest.TestCase):
         cloud, worker = main.app.state.cloud, main.app.state.worker
         source = {'fileId': 'shared', 'fileName': 'Example.mkv', 'resType': 1, 'fileSize': 10}
         owned = {**source, 'fileId': 'owned'}
+        cloud.share_size = AsyncMock(return_value=10)
         cloud.prepare = AsyncMock(return_value=('access', ['shared'], 'Example', [source]))
         cloud.pages = AsyncMock(side_effect=[[], [owned], [owned], [owned]])
         cloud.submit = AsyncMock(return_value='save-receipt')
