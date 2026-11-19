@@ -28,7 +28,10 @@ def extract(text, extra_urls=()):
     text_code = CODE.search(text or '')
     for url in [*URL.findall(text or ''), *extra_urls]:
         url = url.rstrip('。，；、！）)]}›>')
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
         if parsed.scheme not in ('http', 'https') or parsed.hostname not in (
             'guangyapan.com', 'www.guangyapan.com', 'app.guangyapan.com'
         ) or parsed.username or parsed.password:

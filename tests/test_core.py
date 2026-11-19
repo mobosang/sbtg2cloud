@@ -33,6 +33,10 @@ class ExtractTests(unittest.TestCase):
           'https://evil.test/?next=https://www.guangyapan.com/s/abc',
           'https://user@www.guangyapan.com/s/abc', 'https://www.guangyapan.com/activity/foo'])))
 
+    def test_malformed_url_does_not_hide_valid_button(self):
+        links = extract('无效地址 https://[', ['https://www.guangyapan.com/s/valid'])
+        self.assertEqual([link['share_id'] for link in links], ['valid'])
+
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
@@ -223,7 +227,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         tg = Telegram(self.store, Path(self.tmp.name))
         tg.ready_at = 200
         def event(timestamp, chat=5):
-            msg = NS(date=datetime.fromtimestamp(timestamp, timezone.utc), entities=[],
+            msg = NS(id=9, raw_text='button-only', date=datetime.fromtimestamp(timestamp, timezone.utc), entities=[],
                      reply_markup=NS(rows=[NS(buttons=[NS(url='https://www.guangyapan.com/s/button')])]))
             return NS(chat_id=chat, message=msg, id=9, raw_text='button-only')
         await tg.message(event(150))

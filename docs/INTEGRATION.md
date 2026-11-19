@@ -8,7 +8,7 @@
 - [官方扫码流程](https://core.telegram.org/api/qr-login)
 - [Telethon qr_login 与两步验证](https://docs.telethon.dev/en/stable/modules/client.html#telethon.client.auth.AuthMethods.qr_login)
 
-使用用户会话，`catch_up=False`，不调用消息历史读取接口；关闭 SDK 自动重连，由服务管理重连并重置接收时间边界。事件仅处理启用聊天的 NewMessage，正文/文本超链接/URL按钮。消息编辑、回调按钮、机器人交互、需要加入其他群的流程不在第一版范围。
+使用单个用户会话，`catch_up=False`，关闭 SDK 自动重连。连接和鉴权检查完成后才开启接收；初始化失败后即使底层连接仍打开，也会先断开再重新初始化。启用聊天的 NewMessage、MessageEdited 与在线补查共用正文、文本超链接和 URL 按钮提取及去重流程。补查时间窗以在线起点、启用时间和最近 5 分钟中最晚者为准，不回扫旧消息或补抓离线消息。回调按钮和需要机器人交互的链接不自动操作。日志仅记录消息编号、来源、处理入口、入队和去重结果，不记录正文、分享 URL 或凭据。
 
 ## 光鸭
 

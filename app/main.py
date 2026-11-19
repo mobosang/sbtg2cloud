@@ -459,7 +459,12 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
         item.pop('cleanup_manifest', None)
         item.pop('cleanup_plan', None)
     return {'items': items, 'page': page, 'page_size': page_size, 'pages': pages, 'total': total, 'max_id': max_id,
-            'status_filter': status_filter}
+            'status_filter': status_filter,
+            'duplicates': store.rows("""SELECT d.job_id,d.created,j.status,
+                COALESCE(NULLIF(d.title,''),NULLIF(j.resource_name,''),j.share_id) title,
+                CASE WHEN d.source_id=0 THEN '手动提交' ELSE s.title END source_title
+                FROM duplicate_shares d JOIN jobs j ON j.id=d.job_id
+                LEFT JOIN sources s ON s.id=d.source_id ORDER BY d.id DESC LIMIT 20""")}
 
 
 @app.post('/api/jobs/{job_id}/title')

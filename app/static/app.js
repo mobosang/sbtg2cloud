@@ -287,6 +287,13 @@ async function refreshJobs(){
   const snapshot=jobsMaxId===null?'':'&max_id='+jobsMaxId;
   const result=await api('/job-pages?page='+jobsPage+'&page_size='+jobsPageSize+'&status_filter='+jobsFilter+snapshot);
   if(request!==jobsRequest)return;
+  const duplicates=result.duplicates||[];
+  $('duplicate-summary').textContent=duplicates.length
+    ? '最近重复跳过：'+duplicates[0].title+'（原任务 #'+duplicates[0].job_id+'）· 展开查看最近 20 条'
+    : '暂无重复跳过记录';
+  $('duplicate-list').replaceChildren(...duplicates.map(d=>text('li',
+    new Date(d.created*1000).toLocaleString()+' · '+(d.source_title||'未知来源')+' · '+d.title+
+    '：分享 ID 与原任务 #'+d.job_id+' 相同，本次未转存。原任务当前状态：'+(jobStates[d.status]||d.status))));
   $('discard-attention').hidden=jobsFilter!=='attention'||result.total===0;
   $('retry-attention').hidden=$('discard-attention').hidden;
   jobsPage=result.page;jobsPages=result.pages;

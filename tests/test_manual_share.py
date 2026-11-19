@@ -72,6 +72,12 @@ class ManualShareTests(unittest.TestCase):
         manual = self.submit('https://www.guangyapan.com/s/manual-first').json()
         self.assertIsNone(self.call(self.store.enqueue, extract('https://www.guangyapan.com/s/manual-first')[0], source, 100))
         self.assertEqual(self.job(manual['job_id'])['source_id'], 0)
+        self.call(self.store.enqueue, extract('https://www.guangyapan.com/s/manual-first')[0], source, 100)
+        page = self.client.get('/api/job-pages', headers=self.headers).json()
+        self.assertEqual(page['total'], 7)
+        self.assertEqual(len(page['duplicates']), 7)
+        self.assertEqual(page['duplicates'][0]['job_id'], manual['job_id'])
+        self.assertEqual(page['duplicates'][1]['source_title'], '手动提交')
 
     def test_invalid_multiple_and_cross_site_requests_never_enqueue(self):
         for value in (' ', 'https://re0.me/resource/example', 'https://www.guangyapan.com.evil/s/abc',

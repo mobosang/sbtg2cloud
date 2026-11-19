@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import socks
 import httpx
+from telethon import events
 from fastapi.testclient import TestClient
 from app.proxy import http_proxy, ProxyConfigError
 from app.telegram import Telegram, connection_error, TRANSPORT_LOG
@@ -130,6 +131,8 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(options['auto_reconnect'])
                     self.assertEqual(options['connection_retries'], 1)
                     self.assertEqual(tg.state, 'connected')
+                    self.assertEqual([type(call.args[1]) for call in client.add_event_handler.call_args_list],
+                                     [events.NewMessage, events.MessageEdited])
                     client.sign_in.assert_not_called()
 
     async def test_telegram_does_not_inherit_http_proxy(self):
@@ -175,6 +178,35 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await tg.run()
             sleep.assert_awaited_once_with(10)
+
+    async def test_reconnect_restarts_partial_initialization_with_open_socket(self):
+        client = self.mock_client()
+        connected = False
+
+        async def connect():
+            nonlocal connected
+            connected = True
+            if client.connect.await_count == 1:
+                raise TimeoutError('SECRET')
+
+        async def disconnect():
+            nonlocal connected
+            connected = False
+
+        client.is_connected.side_effect = lambda: connected
+        client.connect.side_effect = connect
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        tg = Telegram(self.store, Path(self.tmp.name))
+        with patch('app.telegram.TelegramClient', return_value=client) as factory:
+            self.assertFalse(await tg.connect_once())
+            self.assertTrue(connected)
+            self.assertIsNone(tg.ready_at)
+            self.assertTrue(await tg.connect_once())
+            await tg.ensure()
+            factory.assert_called_once()
+        client.disconnect.assert_awaited_once()
+        self.assertEqual(client.connect.await_count, 2)
+        self.assertEqual(tg.state, 'connected')
 
     async def test_httpx_uses_environment_proxy_and_exact_no_proxy(self):
         os.environ.update(HTTPS_PROXY='http://proxy.example:8080', NO_PROXY='localhost,api.guangyapan.com')

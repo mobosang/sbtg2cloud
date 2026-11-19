@@ -12,6 +12,10 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
         PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS duplicate_shares (
+          id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, source_id INTEGER NOT NULL,
+          message_id INTEGER, created REAL NOT NULL, title TEXT NOT NULL,
+          UNIQUE(job_id,source_id,message_id));
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS media_links (
           id INTEGER PRIMARY KEY AUTOINCREMENT,owner TEXT NOT NULL,path TEXT NOT NULL,
@@ -205,7 +209,14 @@ class Store:
           VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
           (link['share_id'], link['url'], link['code'], source['id'], message_id, target_id, target_name, now, now, resource_name,
            bool(self.get('auto_cleanup', False))))
-        return result.lastrowid if result.rowcount else None
+        if result.rowcount:
+            return result.lastrowid
+        self.execute('''INSERT OR IGNORE INTO duplicate_shares(job_id,source_id,message_id,created,title)
+            SELECT id,?,?,?,? FROM jobs WHERE share_id=?
+            AND NOT (source_id=? AND message_id=? AND ?!=0)''',
+            (source['id'], message_id or None, now, resource_name, link['share_id'],
+             source['id'], message_id, message_id))
+        return None
 
     def save_sources(self, sources):
         ids = [source['id'] for source in sources]
