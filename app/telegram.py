@@ -17,6 +17,7 @@ TRANSPORT_LOG = logging.getLogger('sbtg2cloud.telegram_transport')
 TRANSPORT_LOG.setLevel(logging.CRITICAL + 1)
 TRANSPORT_LOG.propagate = False
 LISTENER_LOG = logging.getLogger('uvicorn.error.sbtg2cloud.telegram')
+LISTENER_LOG.setLevel(logging.INFO)  # The playback servers set uvicorn.error to WARNING.
 CHECK_INTERVAL = 60
 CHECK_WINDOW = 300
 CHECK_LIMIT = 100

@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -38,6 +39,12 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.clock.stop()
         self.store.db.close()
         self.tmp.cleanup()
+
+    def test_listener_info_remains_enabled_when_playback_raises_parent_level(self):
+        parent = logging.getLogger('uvicorn.error')
+        self.addCleanup(parent.setLevel, parent.level)
+        parent.setLevel(logging.WARNING)
+        self.assertTrue(LISTENER_LOG.isEnabledFor(logging.INFO))
 
     async def test_live_edit_and_online_check_backfill_once_with_diagnostics(self):
         original = message(21, 950)
