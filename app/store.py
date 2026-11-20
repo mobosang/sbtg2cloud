@@ -2,7 +2,13 @@ import json
 import secrets
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+
+BYTES_PER_GB = 1_000_000_000
+DEFAULT_DAILY_TRANSFER_LIMIT_GB = 1_000
+TRANSFER_DAY_TIMEZONE = timezone(timedelta(hours=8))
 
 
 class Store:
@@ -17,6 +23,8 @@ class Store:
           message_id INTEGER, created REAL NOT NULL, title TEXT NOT NULL,
           UNIQUE(job_id,source_id,message_id));
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS daily_transfer_usage (
+          day TEXT PRIMARY KEY, used_bytes INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS media_links (
           id INTEGER PRIMARY KEY AUTOINCREMENT,owner TEXT NOT NULL,path TEXT NOT NULL,
           file_id TEXT NOT NULL,url TEXT NOT NULL,created REAL NOT NULL,expires_at REAL NOT NULL,
@@ -51,9 +59,12 @@ class Store:
             'cleanup_next': 'REAL NOT NULL DEFAULT 0',
             'cleanup_completed_at': 'REAL',
             'cleanup_plan': "TEXT NOT NULL DEFAULT ''", 'cleanup_targets': "TEXT NOT NULL DEFAULT ''",
+            'quota_wait': 'INTEGER NOT NULL DEFAULT 0', 'transfer_bytes': 'INTEGER',
         }.items():
             if name not in columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
+        self.db.execute("""CREATE INDEX IF NOT EXISTS jobs_transfer_completions ON jobs(completed_at)
+            WHERE status='success' AND transfer_bytes IS NOT NULL""")
         self.db.execute("UPDATE jobs SET cleanup_state='uncertain', cleanup_error='删除提交期间服务中断，请手动核对；不会再次删除' WHERE cleanup_state='deleting'")
         self.db.execute("UPDATE jobs SET cleanup_state='blocked', cleanup_error='未记录完整目录快照，不会自动删除' WHERE status='success' AND cleanup_enabled=1 AND cleanup_state=''")
         self.db.execute('CREATE TABLE IF NOT EXISTS cleanup_claims (file_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL)')
@@ -87,6 +98,46 @@ class Store:
     def set(self, key, value):
         self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (key, json.dumps(value)))
         self.db.commit()
+
+    def transfer_quota(self):
+        now = datetime.fromtimestamp(time.time(), TRANSFER_DAY_TIMEZONE)
+        day = now.date().isoformat()
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        limit = self.get('daily_transfer_limit_gb', DEFAULT_DAILY_TRANSFER_LIMIT_GB)
+        row = self.db.execute('SELECT used_bytes FROM daily_transfer_usage WHERE day=?', (day,)).fetchone()
+        used = row[0] if row else 0
+        return {'day': day, 'limit_gb': limit, 'used_bytes': used, 'resets_at': midnight.timestamp(),
+                'remaining_bytes': max(0, limit * BYTES_PER_GB - used)}
+
+    def transfer_quota_status(self):
+        quota = self.transfer_quota()
+        midnight = quota['resets_at']
+        completed = self.db.execute("""SELECT transfer_bytes FROM jobs
+            WHERE status='success' AND transfer_bytes IS NOT NULL AND completed_at>=? AND completed_at<?""",
+            (midnight - 86_400, midnight))
+        return {**quota, 'completed_bytes': sum(size for (size,) in completed)}
+
+    def set_daily_transfer_limit(self, gb):
+        previous = self.get('daily_transfer_limit_gb', DEFAULT_DAILY_TRANSFER_LIMIT_GB)
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('daily_transfer_limit_gb', json.dumps(gb)))
+            if gb > previous:
+                self.db.execute("UPDATE jobs SET next_at=0 WHERE status='queued' AND quota_wait=1")
+
+    def reserve_transfer(self, job_id, size):
+        # Commit the charge with the submitting state before the request can reach the cloud.
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            quota = self.transfer_quota()
+            if quota['remaining_bytes'] < max(size, 1):
+                return quota
+            result = self.db.execute("""UPDATE jobs SET status='submitting',error='',transfer_bytes=?,updated=?
+                WHERE id=? AND status='preparing'""", (size, time.time(), job_id))
+            if result.rowcount != 1:
+                raise ValueError('任务状态变化，无法提交转存')
+            self.db.execute("""INSERT INTO daily_transfer_usage(day,used_bytes) VALUES (?,?)
+                ON CONFLICT(day) DO UPDATE SET used_bytes=used_bytes+excluded.used_bytes""", (quota['day'], size))
+        return None
 
     def save_cloud_token(self, value, new_session=False):
         # Rotate cache ownership atomically with QR login, but preserve it during token refresh.
@@ -140,7 +191,7 @@ class Store:
         allowed = {'status', 'attempts', 'next_at', 'remote_task', 'error', 'code', 'resource_name',
                    'completed_at', 'cleanup_enabled', 'cleanup_folder', 'cleanup_name', 'cleanup_manifest',
                    'cleanup_state', 'cleanup_task', 'cleanup_error', 'cleanup_next', 'cleanup_plan', 'cleanup_targets',
-                   'cleanup_completed_at'}
+                   'cleanup_completed_at', 'quota_wait'}
         if not fields.keys() <= allowed:
             raise ValueError('Invalid job fields')
         fields['updated'] = time.time()

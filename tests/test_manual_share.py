@@ -126,6 +126,15 @@ class ManualShareTests(unittest.TestCase):
         self.call(worker.cleanup, self.job(job_id))
         self.assertEqual(self.job(job_id)['cleanup_state'], 'done')
         self.assertIsNotNone(self.job(job_id)['cleanup_completed_at'])
+        result = self.submit('https://www.guangyapan.com/s/example').json()
+        self.assertEqual(result, {'created': False, 'job_id': job_id, 'status': 'success'})
+        page = self.client.get('/api/job-pages', headers=self.headers).json()
+        self.assertEqual(page['total'], 1)
+        record = page['duplicates'][0]
+        self.assertEqual((record['job_id'], record['manual'], record['source_title'], record['status']),
+                         (job_id, 1, '手动提交', 'success'))
+        self.assertEqual(self.call(self.store.rows, 'SELECT used_bytes FROM daily_transfer_usage'), [{'used_bytes': 10}])
+        cloud.submit.assert_awaited_once()
 
 
 if __name__ == '__main__':

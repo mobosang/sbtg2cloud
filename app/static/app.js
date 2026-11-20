@@ -3,7 +3,7 @@ let editingSources = false, visibleJobs = [], sourceList = [], folderStack = [],
 const states = {proxy_config_error:'代理配置错误',not_configured:'未配置',connecting:'连接中',connected:'已连接',disconnected:'连接中断',login_required:'待登录',scan_qr:'等待扫码',password_required:'需要两步验证',qr_expired:'二维码已过期',authorized:'已授权',expired:'二维码已过期',failed:'失败',idle:'未登录'};
 const jobStates = {queued:'排队中',preparing:'读取分享',submitting:'正在提交',submitted:'云端处理中',success:'已完成',failed:'失败',uncertain:'结果待核对',discarded:'已丢弃'};
 const cleanupStates = {pending:'等待清理',deleting:'正在提交删除',submitted:'云端删除中',done:'已移入回收站',blocked:'清理已停止，需核对',uncertain:'删除结果待核对'};
-let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false, shareLimitDirty=false;
+let cleanupEnabled=false, historyPage=1, cleanupMinutes=60, clearToken=null, delayDirty=false, intervalDirty=false, shareLimitDirty=false, dailyLimitDirty=false;
 const mediaDirty=new Set();
 let mediaCachePage=1, mediaCachePages=1, mediaCacheRequest=0;
 const pages={overview:'概览',telegram:'Telegram',cloud:'光鸭云盘',sources:'监听来源',jobs:'转存记录',cleanup:'自动清理',media:'302 播放'};
@@ -56,6 +56,10 @@ async function refreshState(){
   $('manual-share-target').textContent=s.target.name;
   if(!shareLimitDirty)$('share-limit').value=s.share_size_limit_gb;
   $('share-limit-current').textContent='当前分享包大小上限：'+s.share_size_limit_gb+' GB';
+  const quota=s.daily_transfer_quota;
+  if(!dailyLimitDirty)$('daily-transfer-limit').value=quota.limit_gb;
+  const formatGB=bytes=>(bytes/1e9).toLocaleString('zh-CN',{maximumFractionDigits:3});
+  $('daily-transfer-current').textContent=`今日转存成功合计 ${formatGB(quota.completed_bytes)} GB · 已占用 ${formatGB(quota.used_bytes)} / ${quota.limit_gb} GB · 剩余 ${formatGB(quota.remaining_bytes)} GB`;
   cleanupEnabled=s.auto_cleanup;
   cleanupMinutes=s.cleanup_minutes;
   if(!delayDirty)$('cleanup-delay').value=cleanupMinutes;
@@ -145,6 +149,12 @@ $('share-limit-form').onsubmit=async e=>{
   try{await api('/shares/limit',{gb:Number($('share-limit').value)});shareLimitDirty=false;await refreshState();toast('分享包大小上限已保存，超限分享自动丢弃');}
   catch(error){toast(error.message);}finally{button.disabled=false;}
 };
+$('daily-transfer-limit').oninput=()=>{dailyLimitDirty=true;};
+$('daily-transfer-form').onsubmit=async e=>{
+  e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;
+  try{await api('/shares/daily-limit',{gb:Number($('daily-transfer-limit').value)});dailyLimitDirty=false;await refreshState();toast('每日转存上限已保存');}
+  catch(error){toast(error.message);}finally{button.disabled=false;}
+};
 $('cleanup-delay').oninput=()=>{delayDirty=true;};
 $('cleanup-delay-form').onsubmit=async e=>{
   e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;
@@ -226,7 +236,8 @@ $('manual-share-form').onsubmit=async e=>{
     const result=await api('/jobs/manual',{text:submitted});
     if(input.value.trim()===submitted)input.value='';
     await filterJobs('all');await refreshState();
-    toast(result.created?'已加入转存队列，记录 #'+result.job_id:'链接已有记录 #'+result.job_id+'（'+(jobStates[result.status]||result.status)+'），未重复转存');
+    toast(result.created?'已加入转存队列，记录 #'+result.job_id
+      :'手动添加与原任务 #'+result.job_id+' 重复（'+(jobStates[result.status]||result.status)+'），已记录为重复跳过');
   }catch(error){toast(error.message);}finally{button.disabled=false;}
 };
 function renderSources(){
@@ -282,6 +293,11 @@ function discardButton(job){
   };
   return button;
 }
+function duplicateLabel(duplicate){
+  const source=duplicate.manual?'手动添加':(duplicate.source_title||'未知来源');
+  const status=jobStates[duplicate.status]||duplicate.status;
+  return `${source} · ${duplicate.title} · 与原任务 #${duplicate.job_id} 重复（${status}），已跳过`;
+}
 async function refreshJobs(){
   const request=++jobsRequest;
   const snapshot=jobsMaxId===null?'':'&max_id='+jobsMaxId;
@@ -289,11 +305,10 @@ async function refreshJobs(){
   if(request!==jobsRequest)return;
   const duplicates=result.duplicates||[];
   $('duplicate-summary').textContent=duplicates.length
-    ? '最近重复跳过：'+duplicates[0].title+'（原任务 #'+duplicates[0].job_id+'）· 展开查看最近 20 条'
+    ? duplicateLabel(duplicates[0])+' · 展开查看最近 20 条'
     : '暂无重复跳过记录';
   $('duplicate-list').replaceChildren(...duplicates.map(d=>text('li',
-    new Date(d.created*1000).toLocaleString()+' · '+(d.source_title||'未知来源')+' · '+d.title+
-    '：分享 ID 与原任务 #'+d.job_id+' 相同，本次未转存。原任务当前状态：'+(jobStates[d.status]||d.status))));
+    new Date(d.created*1000).toLocaleString()+' · '+duplicateLabel(d))));
   $('discard-attention').hidden=jobsFilter!=='attention'||result.total===0;
   $('retry-attention').hidden=$('discard-attention').hidden;
   jobsPage=result.page;jobsPages=result.pages;

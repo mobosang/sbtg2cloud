@@ -20,7 +20,14 @@
 <section class="card"><div class="section-head"><h2>光鸭云盘</h2><span id="cloud-state" class="status">未登录</span></div><p class="hint">使用光鸭云盘 App 扫码授权。登录信息保存在本地数据目录，过期时尝试自动续期。</p><button id="cloud-qr">生成登录二维码</button><img id="cloud-image" class="qr" alt="光鸭云盘登录二维码" hidden><p id="cloud-error" class="error"></p><div class="destination"><span class="hint">默认保存位置</span><strong id="target">/</strong><button id="choose-default" class="secondary">选择云盘目录</button></div></section>
 </div>
 <div id="page-sources" hidden>
-<section class="card"><h2>转存限制</h2><form id="share-limit-form" class="actions"><label>分享包大小上限（GB）<input id="share-limit" type="number" min="1" step="1" value="200" required aria-describedby="share-limit-hint"></label><button>保存大小上限</button></form><p class="hint" id="share-limit-current" role="status"></p><p class="hint" id="share-limit-hint">默认 200 GB，填写正整数；1 GB = 1,000,000,000 字节。按整个分享（含子目录）的总大小判断，超过上限自动丢弃，等于上限允许转存。Telegram 监听和手动添加共用此设置；无法确认大小时停止转存。保存后无需重启，已提交或已完成的任务不回溯处理。</p></section>
+<section class="card"><h2>转存限制</h2>
+<form id="share-limit-form" class="actions"><label>分享包大小上限（GB）<input id="share-limit" type="number" min="1" step="1" value="200" required aria-describedby="share-limit-hint"></label><button>保存大小上限</button></form>
+<p class="hint" id="share-limit-current" role="status"></p>
+<p class="hint" id="share-limit-hint">默认 200 GB，填写正整数；1 GB = 1,000,000,000 字节。按整个分享（含子目录）的总大小判断，超过上限自动丢弃，等于上限允许转存。Telegram 监听和手动添加共用此设置；无法确认大小时停止转存。保存后无需重启，已提交或已完成的任务不回溯处理。</p>
+<form id="daily-transfer-form" class="actions"><label>每日转存上限（GB）<input id="daily-transfer-limit" type="number" min="1" step="1" value="1000" required aria-describedby="daily-transfer-hint"></label><button>保存每日上限</button></form>
+<p class="hint" id="daily-transfer-current" role="status"></p>
+<p class="hint" id="daily-transfer-hint">默认 1 TB（1000 GB），监听和手动转存共用。提交时占用当天额度，成功合计按确认时间统计。额度不足时，任务排队到北京时间次日 00:00，调高上限后会提前重新核对。</p>
+</section>
 <section class="card"><div class="section-head"><div><h2>监听来源</h2><p class="hint" id="sources-hint">仅显示已保存的监听频道；点击“编辑监听”可增减频道。</p></div><div class="actions"><button id="edit-sources" class="secondary">编辑监听</button><button id="refresh-sources" class="secondary" hidden>获取聊天列表</button><button id="cancel-sources" class="secondary" hidden>取消</button><button id="save-sources" hidden>保存监听</button></div></div><div id="sources" class="source-list"><p class="empty">登录 Telegram 后获取聊天列表，勾选需要监听的频道或群。</p></div>
 <form id="manual-share-form" class="manual-share"><label for="manual-share-link">手动添加光鸭分享</label><div class="actions"><input id="manual-share-link" name="text" type="text" inputmode="url" placeholder="https://www.guangyapan.com/s/…（可附提取码）" maxlength="4096" required autocomplete="off" aria-describedby="manual-share-hint"><button id="manual-share-submit" type="submit">加入转存队列</button></div><p class="hint" id="manual-share-hint">保存到默认目录：<strong id="manual-share-target">/</strong>。与监听任务共用转存队列和去重规则，成功后按当前自动清理设置处理。</p></form></section>
 </div><div id="page-jobs" hidden>

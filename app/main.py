@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .cloud import Cloud, CloudError
-from .store import Store
+from .store import BYTES_PER_GB, Store
 from .extract import extract
 from .telegram import Telegram
 from .worker import Worker
@@ -120,6 +120,7 @@ async def state():
         'cloud': {'configured': bool(store.get('cloud_token')), 'error': cloud.login_error, **app.state.cloud_qr},
         'target': store.get('target', {'id': '', 'name': '/'}),
         'share_size_limit_gb': store.get('share_size_limit_gb', 200),
+        'daily_transfer_quota': store.transfer_quota_status(),
         'auto_cleanup': bool(store.get('auto_cleanup', False)),
         'cleanup_minutes': store.get('cleanup_minutes', 60),
         'cleanup_interval_seconds': store.get('cleanup_interval_seconds', 30),
@@ -188,6 +189,14 @@ class ShareLimit(BaseModel):
 @app.post('/api/shares/limit')
 async def share_limit(value: ShareLimit):
     app.state.store.set('share_size_limit_gb', value.gb)
+    return {'ok': True}
+
+
+@app.post('/api/shares/daily-limit')
+async def daily_share_limit(value: ShareLimit):
+    if value.gb > (2**63 - 1) // BYTES_PER_GB:
+        raise HTTPException(422, '每日转存上限超出支持范围')
+    app.state.store.set_daily_transfer_limit(value.gb)
     return {'ok': True}
 
 
@@ -460,7 +469,7 @@ async def job_pages(page: int = Query(1, ge=1), page_size: int = Query(20),
         item.pop('cleanup_plan', None)
     return {'items': items, 'page': page, 'page_size': page_size, 'pages': pages, 'total': total, 'max_id': max_id,
             'status_filter': status_filter,
-            'duplicates': store.rows("""SELECT d.job_id,d.created,j.status,
+            'duplicates': store.rows("""SELECT d.job_id,d.created,j.status,d.source_id=0 AS manual,
                 COALESCE(NULLIF(d.title,''),NULLIF(j.resource_name,''),j.share_id) title,
                 CASE WHEN d.source_id=0 THEN '手动提交' ELSE s.title END source_title
                 FROM duplicate_shares d JOIN jobs j ON j.id=d.job_id

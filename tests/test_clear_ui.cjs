@@ -3,6 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
+const emptyQuota={limit_gb:1000,used_bytes:0,remaining_bytes:1e12,completed_bytes:0};
 function setup(fetch,confirm=()=>true,hash=''){
   const elements=new Map(), timers=new Map(), events={};let timer=0;
   function element(){return {value:'parent',disabled:false,textContent:'',handlers:{},children:[],attributes:{},dataset:{},
@@ -55,8 +56,18 @@ test('manual share queues once, refreshes records and reports existing tasks',as
     assert.equal(ui.get('manual-share-link').value,'');
     assert.equal(ui.get('manual-share-submit').disabled,false);
     assert.equal(refreshed,2);
-    assert.match(ui.get('notice').textContent,created?/已加入转存队列.*#42/:/已有记录 #42.*已完成.*未重复转存/);
+    assert.match(ui.get('notice').textContent,created?/已加入转存队列.*#42/:/手动添加.*原任务 #42.*重复.*已完成.*重复跳过/);
   }
+});
+
+test('transfer records identify the manual duplicate and original job even when collapsed',async()=>{
+  const ui=setup(async()=>({ok:true,json:async()=>({
+    items:[],page:1,pages:1,total:0,
+    duplicates:[{job_id:42,created:1,manual:1,source_title:'手动提交',title:'Example',status:'success'}]
+  })}));
+  await ui.context.refreshJobs();
+  for(const line of [ui.get('duplicate-summary').textContent,ui.get('duplicate-list').children[0].textContent])
+    assert.match(line,/手动添加.*Example.*原任务 #42.*重复.*已完成.*已跳过/);
 });
 
 test('manual share preserves input on failure and blocks duplicate submissions in flight',async()=>{
@@ -171,6 +182,7 @@ test('confirmed uncertain bulk retry passes explicit permission',async()=>{
 test('share size limit saves GB and polling preserves unsaved input',async()=>{
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
     target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
+    daily_transfer_quota:emptyQuota,
     cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{}};
   const calls=[];
   const ui=setup(async(url,options)=>{
@@ -200,9 +212,34 @@ test('failed limit save keeps the input editable and reports the error',async()=
   assert.equal(ui.get('notice').textContent,'输入格式有误');
 });
 
+test('daily transfer limit displays usage and saves the edited value',async()=>{
+  const quota={limit_gb:1000,used_bytes:25e9,remaining_bytes:975e9,completed_bytes:20e9};
+  const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
+    target:{name:'/Media'},share_size_limit_gb:200,daily_transfer_quota:quota,auto_cleanup:true,
+    cleanup_minutes:30,cleanup_interval_seconds:30,cleanup_queue:{},cleanup_progress:{},counts:{}};
+  const calls=[];
+  const ui=setup(async(url,options)=>{
+    if(url.endsWith('/shares/daily-limit')){
+      const body=JSON.parse(options.body);calls.push(body);
+      quota.limit_gb=body.gb;quota.remaining_bytes=body.gb*1e9-quota.used_bytes;
+    }
+    return {ok:true,json:async()=>url.endsWith('/state')?state:{ok:true}};
+  });
+  await ui.context.refreshState();
+  const input=ui.get('daily-transfer-limit');assert.equal(input.value,1000);
+  assert.match(ui.get('daily-transfer-current').textContent,/成功合计 20 GB.*25 \/ 1000 GB.*975 GB/);
+  input.value='750';input.oninput();
+  await ui.context.refreshState();assert.equal(input.value,'750');
+  const button={disabled:false};
+  await ui.get('daily-transfer-form').onsubmit({preventDefault(){},target:{querySelector:()=>button}});
+  assert.deepEqual(calls,[{gb:750}]);assert.equal(button.disabled,false);
+  assert.match(ui.get('daily-transfer-current').textContent,/25 \/ 750 GB.*725 GB/);
+});
+
 test('interval form saves seconds and polling preserves unsaved input',async()=>{
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
     target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:true,cleanup_minutes:30,cleanup_interval_seconds:30,
+    daily_transfer_quota:emptyQuota,
     cleanup_queue:{pending:75,submitted:1},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{}};
   const calls=[];
   const ui=setup(async(url,options)=>{
@@ -230,7 +267,7 @@ test('cleanup shortcut opens the full cleanup filter',async()=>{
 
 test('media settings preserve edits during polling and save the playback mapping',async()=>{
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
-    target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:30,
+    target:{name:'/Media'},share_size_limit_gb:200,daily_transfer_quota:emptyQuota,auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:30,
     cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{},
     media_proxy:{enabled:false,listening:true,upstream_url:'http://emby.test:8096',emby_prefix:'/Cloud/Guangya',
       cloud_prefix:'/',public_port:'12359',redirects:1,last:{name:'<video>.mkv',at:100},error:''}};
@@ -275,7 +312,7 @@ test('secondary playback settings do not overwrite the existing entrance or its 
     cloud_prefix:'/',public_port:'12359',redirects:1,error:''};
   const secondary={...primary,upstream_url:'http://second.test:8096',public_port:'12360',redirects:0};
   const state={telegram:{state:'connected',error:'',configured:true},cloud:{state:'idle',configured:true},
-    target:{name:'/Media'},share_size_limit_gb:200,auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:10,
+    target:{name:'/Media'},share_size_limit_gb:200,daily_transfer_quota:emptyQuota,auto_cleanup:false,cleanup_minutes:30,cleanup_interval_seconds:10,
     cleanup_queue:{},cleanup_progress:{last:null,current:null,next:null},directory_clear:null,counts:{},
     media_proxy:primary,media_proxy_secondary:secondary};
   const calls=[];

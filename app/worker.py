@@ -5,6 +5,7 @@ import httpx
 from .cloud import CloudError, TaskFailed
 from .cleanup import legacy_manifest, file_spec, transferred_targets, targets_manifest, cleanup_snapshot_matches, resume_reduced_cleanup
 from .directory_clear import DirectoryClear
+from .store import BYTES_PER_GB
 
 
 class Worker:
@@ -16,11 +17,22 @@ class Worker:
 
     def discard_oversized(self, job_id, size):
         limit = self.store.get('share_size_limit_gb', 200)
-        if size <= limit * 1_000_000_000:
+        if size <= limit * BYTES_PER_GB:
             return False
         self.store.update_job(job_id, status='discarded',
-                              error=f'分享总大小 {size:,} 字节（约 {size / 1_000_000_000:.3f} GB），'
+                              error=f'分享总大小 {size:,} 字节（约 {size / BYTES_PER_GB:.3f} GB），'
                                     f'超过上限 {limit} GB；已丢弃，未提交转存')
+        return True
+
+    def defer_for_quota(self, job, quota, size=0):
+        if quota['remaining_bytes'] >= max(1, size):
+            return False
+        if size > quota['limit_gb'] * BYTES_PER_GB:
+            self.store.update_job(job['id'], status='failed',
+                                  error=f'分享大小超过每日转存上限 {quota["limit_gb"]} GB，请调高上限后重试')
+        else:
+            self.store.update_job(job['id'], status='queued', quota_wait=1, attempts=job['attempts'],
+                                  next_at=quota['resets_at'], error='今日剩余转存额度不足，等待额度恢复后继续')
         return True
 
     async def process(self, job):
@@ -51,13 +63,15 @@ class Worker:
                 else:
                     self.store.update_job(jid, next_at=time.time() + 60, error='查询进度暂不可用；保留原云端任务，稍后继续查询')
             return
+        if self.defer_for_quota(job, self.store.transfer_quota()):
+            return
         attempts = job['attempts'] + 1
-        self.store.update_job(jid, status='preparing', attempts=attempts)
+        self.store.update_job(jid, status='preparing', attempts=attempts, quota_wait=0)
         stage = '核对分享大小'
         parent = job['target_id']
         try:
             size = await self.cloud.share_size(job['share_id'])
-            if self.discard_oversized(jid, size):
+            if self.discard_oversized(jid, size) or self.defer_for_quota(job, self.store.transfer_quota(), size):
                 return
             stage = '读取分享'
             if job['cleanup_enabled']:
@@ -92,7 +106,10 @@ class Worker:
         # Settings may change while share and destination metadata are being read.
         if self.discard_oversized(jid, size):
             return
-        self.store.update_job(jid, status='submitting', error='')
+        quota = self.store.reserve_transfer(jid, size)
+        if quota is not None:
+            self.defer_for_quota(job, quota, size)
+            return
         try:
             task = await self.cloud.submit(access, ids, parent)
         except (CloudError, httpx.HTTPError):
